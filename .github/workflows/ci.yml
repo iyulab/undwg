@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --locked
+      # The corpus test skips itself without UNDWG_CORPUS: real DWG files are
+      # not part of this repository.
+      - name: Test
+        run: cargo test --workspace --locked
+
+  # A declared rust-version nobody checks goes stale with the next dependency
+  # bump. This job builds with exactly the declared toolchain, so the
+  # declaration and the truth cannot drift apart silently.
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Read the declared rust-version
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$msrv" || { echo "no rust-version in Cargo.toml"; exit 1; }
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+      - name: Install that toolchain
+        run: rustup toolchain install "$MSRV" --profile minimal
+      - name: Check the workspace with it
+        run: cargo +"$MSRV" check --workspace --all-features --all-targets --locked
+
+  licenses:
+    name: License Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # This crate is MIT and stays permissive all the way down: a copyleft
+      # component arriving through a dependency is exactly what this gate
+      # exists to stop.
+      - name: Check dependency licenses
+        run: cargo deny check licenses sources
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Rustfmt check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
