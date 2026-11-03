@@ -1,0 +1,26 @@
+[package]
+name = "undwg"
+version = "0.0.0"
+edition = "2021"
+# Minimum supported Rust version. Measured, not guessed -- raise it only with
+# a CI job that builds with exactly this toolchain.
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/iyulab/undwg"
+homepage = "https://github.com/iyulab/undwg"
+readme = "README.md"
+description = "A pure-Rust DWG reader built from the public file specification: R2000 to R2018 in, nothing guessed."
+keywords = ["cad", "dwg", "parser"]
+categories = ["parser-implementations", "data-structures"]
+publish = false
+
+[lints.rust]
+# Bytes in, plain data out: there is no reason for `unsafe` here.
+unsafe_code = "forbid"
+
+[lints.clippy]
+# Same input, same bytes: nothing this crate outputs may depend on a hash
+# collection's iteration order. The main guard is clippy.toml's
+# `disallowed-types`; this restriction lint additionally covers `for` loops
+# over any other hash-based type.
+iter_over_hash_type = "warn"
