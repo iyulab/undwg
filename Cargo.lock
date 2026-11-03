@@ -5,7 +5,3 @@ version = 4
 [[package]]
 name = "undwg"
 version = "0.0.0"
-
-[[patch.unused]]
-name = "iron-scout-cad"
-version = "0.15.0"
