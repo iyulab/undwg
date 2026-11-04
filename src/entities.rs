@@ -27,6 +27,14 @@ pub const TYPE_LINE: u16 = 19;
 pub const TYPE_POINT: u16 = 27;
 /// The type code of a text.
 pub const TYPE_TEXT: u16 = 1;
+/// The type code of a vertex of a 2D polyline.
+pub const TYPE_VERTEX_2D: u16 = 10;
+/// The type code of a vertex of a 3D polyline.
+pub const TYPE_VERTEX_3D: u16 = 11;
+/// The type code of a 2D polyline.
+pub const TYPE_POLYLINE_2D: u16 = 15;
+/// The type code of a 3D polyline.
+pub const TYPE_POLYLINE_3D: u16 = 16;
 /// The type code of a spline.
 pub const TYPE_SPLINE: u16 = 36;
 /// The type code of an ordinate dimension.
@@ -214,6 +222,71 @@ pub struct Text {
     pub vertical: i16,
     /// The handle of the text style.
     pub style: u64,
+}
+
+/// A 2D polyline: the settings of the whole line. Its vertices are objects of
+/// their own that it owns; `vertices` names them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Polyline2d {
+    /// The flags: closed `1`, curve fit `2`, spline fit `4`, 3D polyline `8`, 3D mesh `16`, mesh closed `32`, polyface `64`, continuous linetype `128`.
+    pub flags: i16,
+    /// The curve type: none `0`, quadratic B-spline `5`, cubic B-spline `6`, Bezier `8`.
+    pub curve_type: i16,
+    /// The width a vertex starts with when it states none.
+    pub start_width: f64,
+    /// The width a vertex ends with when it states none.
+    pub end_width: f64,
+    /// The thickness.
+    pub thickness: f64,
+    /// The elevation: the z of every vertex.
+    pub elevation: f64,
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// The vertices the polyline owns (R2000 names the first and the last only).
+    pub vertices: Vec<u64>,
+    /// The sequence end that closes the vertices.
+    pub sequence_end: Option<u64>,
+}
+
+/// A 3D polyline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Polyline3d {
+    /// The curve flags: splined `1` (quadratic) or `2` (cubic).
+    pub spline_flags: u8,
+    /// The closing flags: closed `1`.
+    pub closed_flags: u8,
+    /// The vertices the polyline owns (R2000 names the first and the last only).
+    pub vertices: Vec<u64>,
+    /// The sequence end that closes the vertices.
+    pub sequence_end: Option<u64>,
+}
+
+/// A vertex of a 2D polyline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vertex2d {
+    /// The vertex flags: extra vertex `1`, curve fit tangent `2`, spline vertex `8`, spline control point `16`, 3D polyline vertex `32`, 3D mesh vertex `64`.
+    pub flags: u8,
+    /// The point; its z is not stated (the polyline's elevation is).
+    pub point: [f64; 3],
+    /// The width at the start of the segment that leaves the vertex.
+    pub start_width: f64,
+    /// The width at its end.
+    pub end_width: f64,
+    /// The bulge of that segment.
+    pub bulge: f64,
+    /// The vertex identifier (R2010 and later).
+    pub id: i32,
+    /// The tangent direction.
+    pub tangent: f64,
+}
+
+/// A vertex of a 3D polyline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vertex3d {
+    /// The vertex flags.
+    pub flags: u8,
+    /// The point.
+    pub point: [f64; 3],
 }
 
 /// A spline: a curve given by control points and knots, or by points it passes through.
@@ -500,6 +573,14 @@ pub enum Geometry {
     Dimension(Dimension),
     /// A spline.
     Spline(Spline),
+    /// A 2D polyline.
+    Polyline2d(Polyline2d),
+    /// A 3D polyline.
+    Polyline3d(Polyline3d),
+    /// A vertex of a 2D polyline.
+    Vertex2d(Vertex2d),
+    /// A vertex of a 3D polyline.
+    Vertex3d(Vertex3d),
     /// An attribute of a block insertion.
     Attrib(Attribute),
     /// An attribute definition.
@@ -863,6 +944,92 @@ fn skip_color(r: &mut BitReader<'_>, strings: &mut Option<BitReader<'_>>) -> Res
         text_value(r, strings)?;
     }
     Ok(())
+}
+
+/// Reads a 2D polyline; the second value is the count of vertices it owns (R2004 and later).
+fn read_polyline_2d(
+    r: &mut BitReader<'_>,
+    version: Version,
+) -> Result<(Polyline2d, usize), BitError> {
+    let flags = r.bit_short()?;
+    let curve_type = r.bit_short()?;
+    let start_width = r.bit_double()?;
+    let end_width = r.bit_double()?;
+    let thickness = r.bit_thickness()?;
+    let elevation = r.bit_double()?;
+    let extrusion = r.bit_extrusion()?;
+    let owned = if version >= Version::R2004 {
+        bounded_count(r, "vertex count")?
+    } else {
+        0
+    };
+    Ok((
+        Polyline2d {
+            flags,
+            curve_type,
+            start_width,
+            end_width,
+            thickness,
+            elevation,
+            extrusion,
+            vertices: Vec::new(),
+            sequence_end: None,
+        },
+        owned,
+    ))
+}
+
+/// Reads a 3D polyline; the second value is the count of vertices it owns (R2004 and later).
+fn read_polyline_3d(
+    r: &mut BitReader<'_>,
+    version: Version,
+) -> Result<(Polyline3d, usize), BitError> {
+    let spline_flags = r.raw_char()?;
+    let closed_flags = r.raw_char()?;
+    let owned = if version >= Version::R2004 {
+        bounded_count(r, "vertex count")?
+    } else {
+        0
+    };
+    Ok((
+        Polyline3d {
+            spline_flags,
+            closed_flags,
+            vertices: Vec::new(),
+            sequence_end: None,
+        },
+        owned,
+    ))
+}
+
+/// Reads a vertex of a 2D polyline. A negative start width states both widths
+/// (its absolute value) and the end width is then not stored.
+fn read_vertex_2d(r: &mut BitReader<'_>, version: Version) -> Result<Vertex2d, BitError> {
+    let flags = r.raw_char()?;
+    let point = r.point_3bd()?;
+    let mut start_width = r.bit_double()?;
+    let end_width = if start_width < 0.0 {
+        start_width = -start_width;
+        start_width
+    } else {
+        r.bit_double()?
+    };
+    let bulge = r.bit_double()?;
+    let id = if version >= Version::R2010 {
+        r.bit_long()?
+    } else {
+        0
+    };
+    let tangent = r.bit_double()?;
+    Ok(Vertex2d {
+        flags,
+        point,
+        start_width,
+        end_width,
+        bulge,
+        id,
+        tangent,
+    })
 }
 
 /// Reads a spline.
@@ -1331,6 +1498,10 @@ pub fn read_entity(
             | TYPE_TEXT
             | TYPE_MTEXT
             | TYPE_SPLINE
+            | TYPE_POLYLINE_2D
+            | TYPE_POLYLINE_3D
+            | TYPE_VERTEX_2D
+            | TYPE_VERTEX_3D
             | TYPE_DIMENSION_ORDINATE
             ..=TYPE_DIMENSION_DIAMETER
                 | TYPE_ATTRIB
@@ -1379,6 +1550,21 @@ pub fn read_entity(
             Geometry::Dimension(read_dimension(&mut r, &mut strings, version, kind)?)
         }
         TYPE_SPLINE => Geometry::Spline(read_spline(&mut r, version)?),
+        TYPE_POLYLINE_2D => {
+            let (polyline, count) = read_polyline_2d(&mut r, version)?;
+            owned = count;
+            Geometry::Polyline2d(polyline)
+        }
+        TYPE_POLYLINE_3D => {
+            let (polyline, count) = read_polyline_3d(&mut r, version)?;
+            owned = count;
+            Geometry::Polyline3d(polyline)
+        }
+        TYPE_VERTEX_2D => Geometry::Vertex2d(read_vertex_2d(&mut r, version)?),
+        TYPE_VERTEX_3D => Geometry::Vertex3d(Vertex3d {
+            flags: r.raw_char()?,
+            point: r.point_3bd()?,
+        }),
         TYPE_MTEXT => {
             let (mtext, application) = read_mtext(&mut r, &mut strings, version)?;
             registered_application = application;
@@ -1425,6 +1611,22 @@ pub fn read_entity(
     }
     if registered_application {
         h.handle()?; // the registered application
+    }
+    // A polyline names its vertices -- R2000 the first and the last, later versions all
+    // of them -- and then the sequence end.
+    let (vertices, sequence_end) = match &mut geometry {
+        Geometry::Polyline2d(p) => (Some(&mut p.vertices), Some(&mut p.sequence_end)),
+        Geometry::Polyline3d(p) => (Some(&mut p.vertices), Some(&mut p.sequence_end)),
+        _ => (None, None),
+    };
+    if let (Some(vertices), Some(sequence_end)) = (vertices, sequence_end) {
+        let listed = if version >= Version::R2004 { owned } else { 2 };
+        for _ in 0..listed {
+            if let Some(v) = h.handle()?.resolve(common.handle).filter(|&v| v != 0) {
+                vertices.push(v);
+            }
+        }
+        *sequence_end = h.handle()?.resolve(common.handle).filter(|&v| v != 0);
     }
     if let Geometry::Dimension(d) = &mut geometry {
         // A null handle (zero) names nothing.

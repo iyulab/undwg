@@ -109,8 +109,11 @@ fn every_real_line_circle_and_arc_reads() {
         mut mtexts,
         mut dimensions,
         mut splines,
+        mut polylines_2d,
+        mut polylines_3d,
+        mut vertices,
         mut failed,
-    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
+    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
     let mut named_blocks = 0usize;
     let mut references_checked = 0usize;
     for path in &files {
@@ -171,6 +174,37 @@ fn every_real_line_circle_and_arc_reads() {
                 Err(err) => panic!("{}: dimension style {:#x}: {err}", path.display(), e.handle),
             })
             .collect();
+        // The vertices of 2D and 3D polylines, by handle, with the owner each states.
+        let mut vertices_2d = std::collections::BTreeMap::new();
+        let mut vertices_3d = std::collections::BTreeMap::new();
+        for e in entries.iter().filter(|e| e.offset < objects.len() as u64) {
+            if let Ok(Some(vertex)) = read_entity(&objects, *e, version) {
+                match vertex.geometry {
+                    Geometry::Vertex2d(v) => {
+                        vertices_2d.insert(e.handle, (vertex.references.owner, v));
+                    }
+                    Geometry::Vertex3d(v) => {
+                        vertices_3d.insert(e.handle, (vertex.references.owner, v));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // The handles of the vertices a polyline owns: all of them from R2004; in
+        // R2000 the first and the last, and the vertices of that owner between.
+        let owned_vertices =
+            |polyline: u64, listed: &[u64], owners: Vec<(u64, Option<u64>)>| -> Vec<u64> {
+                if version >= Version::R2004 {
+                    listed.to_vec()
+                } else {
+                    let (first, last) = (listed[0], listed[listed.len() - 1]);
+                    owners
+                        .into_iter()
+                        .filter(|(h, o)| *h >= first && *h <= last && *o == Some(polyline))
+                        .map(|(h, _)| h)
+                        .collect()
+                }
+            };
         for entry in &entries {
             if entry.offset >= objects.len() as u64 {
                 continue;
@@ -179,7 +213,7 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 1..=3 | 7 | 17..=19 | 20..=26 | 27 | 28 | 31 | 35 | 36 | 44 | 77)
+            if !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 35 | 36 | 44 | 77)
             {
                 continue;
             }
@@ -217,12 +251,13 @@ fn every_real_line_circle_and_arc_reads() {
             expect(refs.layer, 51, "layer");
             if let Some(owner) = refs.owner {
                 // An attribute belongs to the insertion it follows.
-                let kind = if matches!(entity.geometry, Geometry::Attrib(_)) {
-                    7
-                } else {
-                    49
-                };
-                expect(owner, kind, "owner");
+                match entity.geometry {
+                    Geometry::Attrib(_) => expect(owner, 7, "owner"),
+                    // A vertex belongs to the polyline it is part of.
+                    Geometry::Vertex2d(_) => expect(owner, 15, "owner"),
+                    Geometry::Vertex3d(_) => expect(owner, 16, "owner"),
+                    _ => expect(owner, 49, "owner"),
+                }
             }
             if let Some(x) = refs.xdictionary {
                 expect(x, 42, "extension dictionary");
@@ -410,6 +445,60 @@ fn every_real_line_circle_and_arc_reads() {
                         d.ordinate_flags.map_or(-1, i32::from)
                     )
                 }
+                Geometry::Polyline2d(pl) => {
+                    polylines_2d += 1;
+                    let owners = vertices_2d.iter().map(|(h, (o, _))| (*h, *o)).collect();
+                    let handles = owned_vertices(entry.handle, &pl.vertices, owners);
+                    // closed, elevation, start and end width, extrusion, then x y bulge start-width end-width per vertex
+                    let flat: Vec<f64> = handles
+                        .iter()
+                        .flat_map(|h| {
+                            let v = &vertices_2d[h].1;
+                            [v.point[0], v.point[1], v.bulge, v.start_width, v.end_width]
+                        })
+                        .collect();
+                    assert!(
+                        flat.iter().all(|v| v.is_finite()),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    format!(
+                        "POLYLINE2D\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+                        i32::from(pl.flags & 1 != 0),
+                        pl.elevation,
+                        pl.start_width,
+                        pl.end_width,
+                        pl.extrusion,
+                        pl.curve_type,
+                        flat
+                    )
+                }
+                Geometry::Polyline3d(pl) => {
+                    polylines_3d += 1;
+                    let owners = vertices_3d.iter().map(|(h, (o, _))| (*h, *o)).collect();
+                    let handles = owned_vertices(entry.handle, &pl.vertices, owners);
+                    let flat: Vec<f64> = handles
+                        .iter()
+                        .flat_map(|h| vertices_3d[h].1.point)
+                        .collect();
+                    assert!(
+                        flat.iter().all(|v| v.is_finite()),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    format!(
+                        "POLYLINE3D\t{:?}\t{:?}\t{:?}",
+                        i32::from(pl.closed_flags & 1 != 0),
+                        pl.spline_flags,
+                        flat
+                    )
+                }
+                Geometry::Vertex2d(_) | Geometry::Vertex3d(_) => {
+                    vertices += 1;
+                    continue;
+                }
                 Geometry::Spline(sp) => {
                     splines += 1;
                     assert!(
@@ -546,7 +635,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions, {splines} splines read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions, {splines} splines, {polylines_2d} 2D and {polylines_3d} 3D polylines with {vertices} vertices read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");
