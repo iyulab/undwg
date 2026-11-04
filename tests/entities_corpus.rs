@@ -1,7 +1,7 @@
-//! Lines, circles and arcs of real files.
+//! Lines, circles, arcs and points of real files.
 //!
 //! Point `UNDWG_CORPUS` at one or more directories (separated like `PATH`)
-//! holding `.dwg` files. Every line, circle and arc whose frame is intact must
+//! holding `.dwg` files. Every line, circle, arc and point whose frame is intact must
 //! read, state the handle the object map gives, and hold finite numbers (and
 //! a non-negative radius). With `UNDWG_DUMP` set to a file name, every entity
 //! read is also written there, one per line, so that it can be compared with
@@ -53,7 +53,8 @@ fn every_real_line_circle_and_arc_reads() {
         std::io::BufWriter::new(std::fs::File::create(p).expect("UNDWG_DUMP is writable"))
     });
 
-    let (mut files_read, mut lines, mut circles, mut arcs, mut failed) = (0, 0, 0, 0, 0usize);
+    let (mut files_read, mut lines, mut circles, mut arcs, mut points, mut failed) =
+        (0, 0, 0, 0, 0, 0usize);
     for path in &files {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let (version, handles, objects): (Version, Vec<u8>, Vec<u8>) = match read_header(&bytes) {
@@ -89,7 +90,7 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 17..=19) {
+            if !matches!(frame.type_code, 17..=19 | 27) {
                 continue;
             }
             let entity = match read_entity(&objects, *entry, version) {
@@ -149,6 +150,18 @@ fn every_real_line_circle_and_arc_reads() {
                         a.center, a.radius, a.start_angle, a.end_angle
                     )
                 }
+                Geometry::Point(p) => {
+                    points += 1;
+                    assert!(
+                        finite(&p.position)
+                            && p.thickness.is_finite()
+                            && p.x_axis_angle.is_finite(),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    format!("POINT	{:?}", p.position)
+                }
                 _ => continue,
             };
             if let Some(out) = dump.as_mut() {
@@ -157,7 +170,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs read; {failed} unreadable"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points read; {failed} unreadable"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");

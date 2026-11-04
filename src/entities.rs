@@ -3,7 +3,7 @@
 //! An entity begins with data every entity has -- its handle, extended data,
 //! a flag for a stored graphic, colour, linetype scale and so on -- and then
 //! the fields of its own kind. This module reads the common data and the
-//! three simplest kinds: lines, circles and arcs. Any other kind is left
+//! simplest kinds: lines, circles, arcs and points. Any other kind is left
 //! alone (`Ok(None)`), never guessed at.
 //!
 //! Only the main bit stream is read; the strings and handle references that
@@ -19,6 +19,8 @@ pub const TYPE_ARC: u16 = 17;
 pub const TYPE_CIRCLE: u16 = 18;
 /// The type code of a line.
 pub const TYPE_LINE: u16 = 19;
+/// The type code of a point.
+pub const TYPE_POINT: u16 = 27;
 
 /// What every entity states about itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +89,19 @@ pub struct Arc {
     pub end_angle: f64,
 }
 
+/// A point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Point {
+    /// The position.
+    pub position: [f64; 3],
+    /// The thickness.
+    pub thickness: f64,
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// The angle of the x axis, in radians.
+    pub x_axis_angle: f64,
+}
+
 /// The geometry of an entity of a kind this reader reads.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -97,6 +112,8 @@ pub enum Geometry {
     Circle(Circle),
     /// An arc.
     Arc(Arc),
+    /// A point.
+    Point(Point),
 }
 
 /// An entity: its common data and its geometry.
@@ -239,7 +256,16 @@ fn read_arc(r: &mut BitReader<'_>) -> Result<Arc, BitError> {
     })
 }
 
-/// Reads the entity at `entry` if it is a line, a circle or an arc;
+fn read_point(r: &mut BitReader<'_>) -> Result<Point, BitError> {
+    Ok(Point {
+        position: r.point_3bd()?,
+        thickness: r.bit_thickness()?,
+        extrusion: r.bit_extrusion()?,
+        x_axis_angle: r.bit_double()?,
+    })
+}
+
+/// Reads the entity at `entry` if it is a line, a circle, an arc or a point;
 /// `Ok(None)` for any other kind of object.
 ///
 /// `objects` is the assembled `AcDb:AcDbObjects` section (for R2000 the
@@ -251,7 +277,10 @@ pub fn read_entity(
     version: Version,
 ) -> Result<Option<Entity>, ObjectError> {
     let (frame, mut r) = open_object(objects, entry, version)?;
-    if !matches!(frame.type_code, TYPE_ARC | TYPE_CIRCLE | TYPE_LINE) {
+    if !matches!(
+        frame.type_code,
+        TYPE_ARC | TYPE_CIRCLE | TYPE_LINE | TYPE_POINT
+    ) {
         return Ok(None);
     }
     let common = read_common(&mut r, version)?;
@@ -262,6 +291,7 @@ pub fn read_entity(
     }
     let geometry = match frame.type_code {
         TYPE_LINE => Geometry::Line(read_line(&mut r)?),
+        TYPE_POINT => Geometry::Point(read_point(&mut r)?),
         TYPE_CIRCLE => Geometry::Circle(read_circle(&mut r)?),
         _ => Geometry::Arc(read_arc(&mut r)?),
     };
