@@ -2589,10 +2589,10 @@ pub struct Leader {
     /// The end point projection (the offset of the annotation with the
     /// extrusion direction taken into account).
     pub end_projection: [f64; 3],
-    /// The height of the annotation's text box.
-    pub box_height: f64,
-    /// The width of the annotation's text box.
-    pub box_width: f64,
+    /// The height of the annotation's text box (up to R2007; later files leave the box out).
+    pub box_height: Option<f64>,
+    /// The width of the annotation's text box (up to R2007).
+    pub box_width: Option<f64>,
     /// The hook line lies along the x direction.
     pub hook_line_on_x: bool,
     /// The leader has an arrowhead.
@@ -2604,14 +2604,6 @@ pub struct Leader {
 }
 
 fn read_leader(r: &mut BitReader<'_>, version: Version) -> Result<Leader, BitError> {
-    // The leaders of R2010 and later in the files seen are shorter than the fields
-    // the specification lists for the part after the vertices, and what the
-    // difference is has not been worked out; reading on would give wrong numbers.
-    if version >= Version::R2010 {
-        return Err(BitError::Unsupported {
-            form: "a leader of R2010 and later",
-        });
-    }
     r.bit()?; // always zero
     let annotation_type = r.bit_short()?;
     let path_type = r.bit_short()?;
@@ -2625,8 +2617,12 @@ fn read_leader(r: &mut BitReader<'_>, version: Version) -> Result<Leader, BitErr
     let x_direction = r.point_3bd()?;
     let block_offset = r.point_3bd()?;
     let end_projection = r.point_3bd()?;
-    let box_height = r.bit_double()?;
-    let box_width = r.bit_double()?;
+    // The size of the text box is stated up to R2007; later files leave it out.
+    let (box_height, box_width) = if version < Version::R2010 {
+        (Some(r.bit_double()?), Some(r.bit_double()?))
+    } else {
+        (None, None)
+    };
     let hook_line_on_x = r.bit()?;
     let arrowhead = r.bit()?;
     r.bit_short()?; // unknown

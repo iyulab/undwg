@@ -95,13 +95,11 @@ fn every_real_file_reads_into_a_consistent_drawing() {
             "{}: the top level is not what the spaces own",
             path.display()
         );
-        // The diagnostics only name what is not converted yet, the leaders of R2010
-        // and later, and the texts in a code page, which are named as not read.
+        // The diagnostics only name what is not converted yet and the texts in a code
+        // page, which are named as not read.
         for w in &db.read_diagnostics.warnings {
             assert!(
-                w.contains("entity not converted")
-                    || w.contains("a leader of R2010 and later is not read")
-                    || w.contains("in a code page that is not read"),
+                w.contains("entity not converted") || w.contains("in a code page that is not read"),
                 "{}: unexpected diagnostic {w:?}",
                 path.display()
             );
