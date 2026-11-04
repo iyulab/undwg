@@ -242,6 +242,34 @@ fn text_value(
     }
 }
 
+/// Reads a colour as a table entry states it.
+fn read_table_color(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+) -> Result<TableColor, BitError> {
+    if version >= Version::R2004 {
+        r.bit_short()?; // always zero
+        let rgb = r.bit_long()? as u32;
+        let names = r.raw_char()?;
+        if names & 1 != 0 {
+            text_value(r, strings)?; // the colour name
+        }
+        if names & 2 != 0 {
+            text_value(r, strings)?; // the colour book name
+        }
+        Ok(TableColor {
+            method: (rgb >> 24) as u8,
+            value: rgb & 0x00FF_FFFF,
+        })
+    } else {
+        Ok(TableColor {
+            method: 0xC3,
+            value: r.bit_short()? as u16 as u32,
+        })
+    }
+}
+
 /// A colour as a table entry states it (R2000 and later): the way it is given
 /// and its value. R2000 states an AutoCAD colour number. From R2004 a long
 /// holds the way in its top byte -- `0xC0` by layer, `0xC1` by block, `0xC2` a
@@ -303,26 +331,7 @@ pub fn read_layer(
     };
     skip_xref_fields(&mut o.r, version)?;
     let flags = o.r.bit_short()? as u16;
-    let color = if version >= Version::R2004 {
-        o.r.bit_short()?; // always zero
-        let rgb = o.r.bit_long()? as u32;
-        let names = o.r.raw_char()?;
-        if names & 1 != 0 {
-            text_value(&mut o.r, &mut o.strings)?; // the colour name
-        }
-        if names & 2 != 0 {
-            text_value(&mut o.r, &mut o.strings)?; // the colour book name
-        }
-        TableColor {
-            method: (rgb >> 24) as u8,
-            value: rgb & 0x00FF_FFFF,
-        }
-    } else {
-        TableColor {
-            method: 0xC3,
-            value: o.r.bit_short()? as u16 as u32,
-        }
-    };
+    let color = read_table_color(&mut o.r, &mut o.strings, version)?;
     o.check_main_end("layer main data length")?;
     let (mut h, owner) = o.handles(entry.handle)?;
     let xref_block = h.next()?;
@@ -516,6 +525,183 @@ pub fn read_image_definition(
         loaded,
         resolution_unit,
         pixel_size,
+        owner,
+    }))
+}
+
+/// A dimension style: the settings the dimensions that use it follow. Only
+/// the settings that dimension values and their texts depend on are kept; the
+/// rest are read and dropped.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DimStyle {
+    /// The style's handle.
+    pub handle: u64,
+    /// The style name.
+    pub name: TextValue,
+    /// The prefix and suffix of the measurement text (`DIMPOST`).
+    pub post: TextValue,
+    /// The overall scale (`DIMSCALE`).
+    pub scale: f64,
+    /// The arrow size (`DIMASZ`).
+    pub arrow_size: f64,
+    /// The rounding of the measurement (`DIMRND`).
+    pub rounding: f64,
+    /// The upper tolerance (`DIMTP`).
+    pub tolerance_upper: f64,
+    /// The lower tolerance (`DIMTM`).
+    pub tolerance_lower: f64,
+    /// Tolerances are shown (`DIMTOL`).
+    pub tolerances: bool,
+    /// Limits are shown (`DIMLIM`).
+    pub limits: bool,
+    /// The zero suppression (`DIMZIN`).
+    pub zero_suppression: i16,
+    /// The text height (`DIMTXT`).
+    pub text_height: f64,
+    /// The factor measurements are multiplied by (`DIMLFAC`).
+    pub length_factor: f64,
+    /// The gap between the text and the dimension line (`DIMGAP`).
+    pub text_gap: f64,
+    /// The number of decimal places (`DIMDEC`).
+    pub decimal_places: i16,
+    /// The number of decimal places of the tolerances (`DIMTDEC`).
+    pub tolerance_decimal_places: i16,
+    /// The angular unit format (`DIMAUNIT`).
+    pub angular_unit_format: i16,
+    /// The angular decimal places (`DIMADEC`).
+    pub angular_decimal_places: i16,
+    /// The fraction format (`DIMFRAC`).
+    pub fraction_format: i16,
+    /// The linear unit format (`DIMLUNIT`).
+    pub linear_unit_format: i16,
+    /// The arc length symbol (`DIMARCSYM`, R2007 and later).
+    pub arc_symbol: Option<i16>,
+    /// The text style (`DIMTXSTY`).
+    pub text_style: Option<u64>,
+    /// The object that owns the style.
+    pub owner: Option<u64>,
+}
+
+/// Reads the dimension style at `entry`; `Ok(None)` when the object is of
+/// another kind.
+///
+/// The fields are those of the dimension variables in the order of the
+/// specification; the main stream must end exactly where they do.
+pub fn read_dim_style(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<Option<DimStyle>, ObjectError> {
+    let Some(mut o) = open_entry(objects, entry, version, TYPE_DIMSTYLE)? else {
+        return Ok(None);
+    };
+    skip_xref_fields(&mut o.r, version)?;
+    let post = text_value(&mut o.r, &mut o.strings)?;
+    text_value(&mut o.r, &mut o.strings)?; // DIMAPOST
+    let scale = o.r.bit_double()?;
+    let arrow_size = o.r.bit_double()?;
+    o.r.bit_double()?; // DIMEXO
+    o.r.bit_double()?; // DIMDLI
+    o.r.bit_double()?; // DIMEXE
+    let rounding = o.r.bit_double()?;
+    o.r.bit_double()?; // DIMDLE
+    let tolerance_upper = o.r.bit_double()?;
+    let tolerance_lower = o.r.bit_double()?;
+    if version >= Version::R2007 {
+        o.r.bit_double()?; // DIMFXL
+        o.r.bit_double()?; // DIMJOGANG
+        o.r.bit_short()?; // DIMTFILL
+        read_table_color(&mut o.r, &mut o.strings, version)?; // DIMTFILLCLR
+    }
+    let tolerances = o.r.bit()?;
+    let limits = o.r.bit()?;
+    for _ in 0..4 {
+        o.r.bit()?; // DIMTIH, DIMTOH, DIMSE1, DIMSE2
+    }
+    o.r.bit_short()?; // DIMTAD
+    let zero_suppression = o.r.bit_short()?;
+    o.r.bit_short()?; // DIMAZIN
+    let arc_symbol = if version >= Version::R2007 {
+        Some(o.r.bit_short()?)
+    } else {
+        None
+    };
+    let text_height = o.r.bit_double()?;
+    o.r.bit_double()?; // DIMCEN
+    o.r.bit_double()?; // DIMTSZ
+    o.r.bit_double()?; // DIMALTF
+    let length_factor = o.r.bit_double()?;
+    o.r.bit_double()?; // DIMTVP
+    o.r.bit_double()?; // DIMTFAC
+    let text_gap = o.r.bit_double()?;
+    o.r.bit_double()?; // DIMALTRND
+    o.r.bit()?; // DIMALT
+    o.r.bit_short()?; // DIMALTD
+    for _ in 0..4 {
+        o.r.bit()?; // DIMTOFL, DIMSAH, DIMTIX, DIMSOXD
+    }
+    for _ in 0..3 {
+        read_table_color(&mut o.r, &mut o.strings, version)?; // DIMCLRD, DIMCLRE, DIMCLRT
+    }
+    let angular_decimal_places = o.r.bit_short()?;
+    let decimal_places = o.r.bit_short()?;
+    let tolerance_decimal_places = o.r.bit_short()?;
+    o.r.bit_short()?; // DIMALTU
+    o.r.bit_short()?; // DIMALTTD
+    let angular_unit_format = o.r.bit_short()?;
+    let fraction_format = o.r.bit_short()?;
+    let linear_unit_format = o.r.bit_short()?;
+    o.r.bit_short()?; // DIMDSEP
+    o.r.bit_short()?; // DIMTMOVE
+    o.r.bit_short()?; // DIMJUST
+    o.r.bit()?; // DIMSD1
+    o.r.bit()?; // DIMSD2
+    o.r.bit_short()?; // DIMTOLJ
+    o.r.bit_short()?; // DIMTZIN
+    o.r.bit_short()?; // DIMALTZ
+    o.r.bit_short()?; // DIMALTTZ
+    o.r.bit()?; // DIMUPT
+    o.r.bit_short()?; // DIMATFIT
+    if version >= Version::R2007 {
+        o.r.bit()?; // DIMFXLON
+    }
+    if version >= Version::R2010 {
+        o.r.bit()?; // DIMTXTDIRECTION
+        o.r.bit_double()?; // DIMALTMZF
+        text_value(&mut o.r, &mut o.strings)?; // DIMALTMZS
+        o.r.bit_double()?; // DIMMZF
+        text_value(&mut o.r, &mut o.strings)?; // DIMMZS
+    }
+    o.r.bit_short()?; // DIMLWD
+    o.r.bit_short()?; // DIMLWE
+    o.r.bit()?; // the 0-bit of the DXF flags
+    o.check_main_end("dimension style main data length")?;
+    let (mut h, owner) = o.handles(entry.handle)?;
+    h.next()?; // the external reference block
+    let text_style = h.next()?;
+    Ok(Some(DimStyle {
+        handle: entry.handle,
+        name: o.name,
+        post,
+        scale,
+        arrow_size,
+        rounding,
+        tolerance_upper,
+        tolerance_lower,
+        tolerances,
+        limits,
+        zero_suppression,
+        text_height,
+        length_factor,
+        text_gap,
+        decimal_places,
+        tolerance_decimal_places,
+        angular_unit_format,
+        angular_decimal_places,
+        fraction_format,
+        linear_unit_format,
+        arc_symbol,
+        text_style,
         owner,
     }))
 }

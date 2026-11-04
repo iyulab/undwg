@@ -38,6 +38,7 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | Raster images and image definitions (R2000, R2004 and later) | done |
 | Leaders (R2000 and R2004; leaders of R2010 and later are refused) | done |
 | Multilines and multiline style names (R2000, R2004 and later) | done |
+| Dimension styles (R2000, R2004 and later) | done |
 | Other entities, other tables, header variables | planned |
 
 Files older than R2000 are an explicit error that names the version bytes it found. Writing DWG is out of scope.

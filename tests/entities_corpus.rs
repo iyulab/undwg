@@ -12,10 +12,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use undwg::{
-    read_block_header, read_block_name, read_classes, read_dimstyle_name, read_directory,
-    read_entity, read_entity_with_classes, read_header, read_image_definition, read_layer,
-    read_linetype_name, read_mlinestyle_name, read_object_frame, read_object_map, read_section,
-    FileHeader, Geometry, HatchEdge, TextValue, Version,
+    read_block_header, read_block_name, read_classes, read_dim_style, read_dimstyle_name,
+    read_directory, read_entity, read_entity_with_classes, read_header, read_image_definition,
+    read_layer, read_linetype_name, read_mlinestyle_name, read_object_frame, read_object_map,
+    read_section, FileHeader, Geometry, HatchEdge, TextValue, Version,
 };
 
 /// A text as the dump writes it: `U:` and the hex of its UTF-8 for Unicode
@@ -342,6 +342,43 @@ fn every_real_line_circle_and_arc_reads() {
                 Err(err) => panic!("{}: multiline style {:#x}: {err}", path.display(), e.handle),
             })
             .collect();
+        // Every dimension style in full; written to the dump once per file.
+        for e in entries.iter().filter(|e| e.offset < objects.len() as u64) {
+            match read_dim_style(&objects, *e, version) {
+                Ok(Some(d)) => {
+                    if let Some(out) = dump.as_mut() {
+                        writeln!(
+                            out,
+                            "{}\t{:X}\tDIMSTYLE\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+                            path.display(),
+                            d.handle,
+                            text_hex(&d.name),
+                            text_hex(&d.post),
+                            d.scale,
+                            d.length_factor,
+                            u8::from(d.tolerances),
+                            u8::from(d.limits),
+                            d.tolerance_upper,
+                            d.tolerance_lower,
+                            d.decimal_places,
+                            d.tolerance_decimal_places,
+                            d.text_height,
+                            d.arrow_size,
+                            d.linear_unit_format,
+                            d.zero_suppression,
+                            d.rounding,
+                            d.angular_unit_format,
+                            d.angular_decimal_places,
+                            d.fraction_format,
+                            d.text_gap
+                        )
+                        .unwrap();
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => panic!("{}: dimension style {:#x}: {err}", path.display(), e.handle),
+            }
+        }
         // The vertices of 2D and 3D polylines, by handle, with the owner each states.
         let mut vertices_2d = std::collections::BTreeMap::new();
         let mut vertices_3d = std::collections::BTreeMap::new();
