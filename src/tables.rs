@@ -39,6 +39,67 @@ pub fn read_block_name(
     read_table_name(objects, entry, version, TYPE_BLOCK_HEADER)
 }
 
+/// The type code of the block table's control object.
+pub const TYPE_BLOCK_CONTROL: u16 = 48;
+
+/// Reads the block table's control object at `entry`: the handles of the block
+/// headers in table order -- the blocks the file counts, then model space and
+/// paper space. `Ok(None)` when the object is of another kind.
+pub fn read_block_control(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<Option<Vec<u64>>, ObjectError> {
+    let Some(Prefix {
+        mut r,
+        layout,
+        reactors,
+        xdictionary_stored,
+    }) = open_prefix(objects, entry, version, |code| code == TYPE_BLOCK_CONTROL)?
+    else {
+        return Ok(None);
+    };
+    let count = r.bit_long()?;
+    if r.position() != layout.main_end {
+        return Err(ObjectError::Unexpected {
+            what: "block control main data length",
+        });
+    }
+    let count = usize::try_from(count)
+        .ok()
+        .filter(|&n| n <= r.remaining() / 8)
+        .ok_or(ObjectError::Unexpected {
+            what: "block control entry count",
+        })?;
+    let mut h = r.clone();
+    h.seek(layout.handle_start);
+    let mut handles = Handles {
+        h,
+        holder: entry.handle,
+    };
+    handles.next()?; // the owner
+    let reactor_count = usize::try_from(reactors)
+        .ok()
+        .filter(|&n| n <= handles.h.remaining() / 8)
+        .ok_or(ObjectError::Unexpected {
+            what: "reactor count",
+        })?;
+    for _ in 0..reactor_count {
+        handles.next()?;
+    }
+    if xdictionary_stored {
+        handles.next()?;
+    }
+    let mut order = Vec::with_capacity(count + 2);
+    // The listed blocks, then model space and paper space.
+    for _ in 0..count + 2 {
+        if let Some(handle) = handles.next()? {
+            order.push(handle);
+        }
+    }
+    Ok(Some(order))
+}
+
 /// Reads the name of the dimension style at `entry`; `Ok(None)` when the
 /// object is of another kind.
 pub fn read_dimstyle_name(

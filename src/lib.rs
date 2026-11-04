@@ -60,10 +60,10 @@ pub use sections::{
     SectionDirectory, SectionError, SectionPage,
 };
 pub use tables::{
-    read_block_header, read_block_name, read_dim_style, read_dimstyle_name, read_image_definition,
-    read_layer, read_linetype_name, read_mlinestyle_name, read_style_name, BlockHeader, DimStyle,
-    ImageDefinition, Layer, TableColor, TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER,
-    TYPE_LINETYPE, TYPE_MLINESTYLE, TYPE_STYLE,
+    read_block_control, read_block_header, read_block_name, read_dim_style, read_dimstyle_name,
+    read_image_definition, read_layer, read_linetype_name, read_mlinestyle_name, read_style_name,
+    BlockHeader, DimStyle, ImageDefinition, Layer, TableColor, TYPE_BLOCK_CONTROL,
+    TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE, TYPE_MLINESTYLE, TYPE_STYLE,
 };
 pub use variables::{
     read_header_variables, ControlHandles, DimensionVariables, ExtendedVariables, HeaderColor,

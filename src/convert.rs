@@ -6,14 +6,16 @@
 //! object it cannot decode and a text it cannot turn into characters are
 //! each named in the drawing's [`ReadDiagnostics`], with how many there were.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use uncad_model::color::ACI_PALETTE;
 use uncad_model::model::{
-    ArcEntity, CircleEntity, Confidence, EllipseEntity, EntityCommon, EntityId, EntityLinetype,
-    Face3DEntity, HorizontalJustification, LineEntity, LwPolylineEntity, Origin, Point2D, Point3D,
-    PointEntity, PolylineVertex, RayEntity, Ref, SolidEntity, TextEntity, VerticalJustification,
+    ArcEntity, AttdefEntity, AttribEntity, AttributeFlags, CircleEntity, Confidence, EllipseEntity,
+    EntityCommon, EntityId, EntityLinetype, Face3DEntity, HorizontalJustification, InsertEntity,
+    LineEntity, LwPolylineEntity, MTextAttachment, MTextEntity, Origin, Point2D, Point3D,
+    PointEntity, PolylineVertex, RayEntity, Ref, SolidEntity, SplineEntity, TextEntity,
+    VerticalJustification,
 };
 use uncad_model::tables::{BlockRecord, ExternalReference, LayerRecord, Tables};
 use uncad_model::text::decode_escapes;
@@ -24,7 +26,8 @@ use crate::drawing::{Drawing, DrawingError};
 use crate::entities::{self, read_entity_links, read_entity_with_classes, Geometry};
 use crate::objects::ObjectEntry;
 use crate::tables::{
-    read_block_header, read_layer, read_linetype_name, read_style_name, BlockHeader, Layer,
+    read_block_control, read_block_header, read_layer, read_linetype_name, read_style_name,
+    BlockHeader, Layer,
 };
 use crate::version::Version;
 
@@ -139,6 +142,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let mut linetypes: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut headers: Vec<BlockHeader> = Vec::new();
+    let mut table_order: Vec<u64> = Vec::new();
     for e in &entries {
         match read_layer(objects, *e, version) {
             Ok(Some(layer)) => {
@@ -173,6 +177,17 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
                 continue;
             }
         }
+        match read_block_control(objects, *e, version) {
+            Ok(Some(order)) => {
+                table_order = order;
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                notes.add("block table that could not be read");
+                continue;
+            }
+        }
         match read_block_header(objects, *e, version) {
             Ok(Some(block)) => headers.push(block),
             Ok(None) => {}
@@ -186,7 +201,13 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     // counter from the second on.
     let mut block_names: BTreeMap<u64, String> = BTreeMap::new();
     let mut taken: BTreeMap<String, usize> = BTreeMap::new();
+    let position: BTreeMap<u64, usize> = table_order
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (*h, i))
+        .collect();
     for (index, block) in headers.iter().enumerate() {
+        let index = position.get(&block.handle).copied().unwrap_or(index);
         let Some(stored) = characters(&block.name) else {
             notes.add("block name in a code page that is not read");
             continue;
@@ -249,17 +270,66 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         );
     }
 
+    // Every entity the file keeps, read once.
+    let by_handle: BTreeMap<u64, ObjectEntry> = entries.iter().map(|e| (e.handle, *e)).collect();
+    let mut read: Vec<entities::Entity> = Vec::new();
+    for e in &entries {
+        match read_entity_with_classes(objects, *e, version, drawing.classes()) {
+            Ok(Some(entity)) => read.push(entity),
+            Ok(None) => {}
+            Err(e) => notes.add(format!("entity that could not be read ({e})")),
+        }
+    }
+    let ctx = Context {
+        version,
+        objects,
+        by_handle: &by_handle,
+        layers: &layer_names,
+        linetypes: &linetypes,
+        styles: &styles,
+        block_names: &block_names,
+    };
+
+    // The attributes first: an insertion takes the ones it lists.
+    let mut attribs: BTreeMap<u64, AttribEntity> = BTreeMap::new();
+    for entity in &read {
+        if let Geometry::Attrib(a) = &entity.geometry {
+            if let Some(text) = convert_text(&a.text, &ctx, &mut notes) {
+                attribs.insert(
+                    entity.common.handle,
+                    AttribEntity {
+                        common: convert_common(entity, &ctx),
+                        start_point: text.start_point,
+                        text_height: text.height,
+                        tag: String::new(),
+                        flags: attribute_flags(a.flags),
+                        text: text.value,
+                        rotation: text.rotation,
+                        horizontal_justification: text.horizontal,
+                        vertical_justification: text.vertical,
+                        alignment_point: text.alignment,
+                        width_factor: text.width_factor,
+                        oblique_angle: text.oblique,
+                        style_name: text.style,
+                        elevation: text.elevation,
+                        extrusion: text.extrusion,
+                    },
+                );
+                if let Some(tag) = characters(&a.tag) {
+                    if let Some(x) = attribs.get_mut(&entity.common.handle) {
+                        x.tag = tag;
+                    }
+                } else {
+                    attribs.remove(&entity.common.handle);
+                    notes.add("attribute tag in a code page that is not read");
+                }
+            }
+        }
+    }
+
     // The entities, converted, with the block each one says it belongs to.
     let mut converted: BTreeMap<u64, (String, Entity)> = BTreeMap::new();
-    for e in &entries {
-        let entity = match read_entity_with_classes(objects, *e, version, drawing.classes()) {
-            Ok(Some(entity)) => entity,
-            Ok(None) => continue,
-            Err(e) => {
-                notes.add(format!("entity that could not be read ({e})"));
-                continue;
-            }
-        };
+    for entity in &read {
         let owner = match entity.references.owner.and_then(|h| block_names.get(&h)) {
             Some(name) => Some(name),
             None => match entity.common.entity_mode {
@@ -279,19 +349,13 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             }
             continue;
         };
-        let ctx = Context {
-            version,
-            layers: &layer_names,
-            linetypes: &linetypes,
-            styles: &styles,
-        };
-        let Some(entity) = convert_entity(&entity, &ctx, &mut notes) else {
+        let Some(converted_entity) = convert_entity(entity, &ctx, &attribs, &mut notes) else {
             let kind = format!("{:?}", entity.geometry);
             let kind = kind.split(['(', ' ', '{']).next().unwrap_or("").to_string();
             notes.add(format!("{kind} entity not converted"));
             continue;
         };
-        converted.insert(e.handle, (owner.clone(), entity));
+        converted.insert(entity.common.handle, (owner.clone(), converted_entity));
     }
 
     // The entities of each block, in the order the block draws them: the
@@ -305,7 +369,10 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         let order = if version >= Version::R2004 {
             block.owned_entities.clone()
         } else {
-            chain(objects, &entries, version, block, &mut notes)
+            match (block.first_entity, block.last_entity) {
+                (Some(first), Some(last)) => chain(&ctx, first, last, &mut notes),
+                _ => Vec::new(),
+            }
         };
         for handle in order {
             if let Some((_, entity)) = converted.remove(&handle) {
@@ -386,24 +453,16 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     })
 }
 
-/// The entities of an R2000 block in drawing order: from the first to the last,
-/// each naming the next -- or, where the file keeps no links, the handle after
-/// its own. A break in the chain is reported, and what follows it is not read.
-fn chain(
-    objects: &[u8],
-    entries: &[ObjectEntry],
-    version: Version,
-    block: &BlockHeader,
-    notes: &mut Notes,
-) -> Vec<u64> {
-    let (Some(first), Some(last)) = (block.first_entity, block.last_entity) else {
-        return Vec::new();
-    };
-    let by_handle: BTreeMap<u64, ObjectEntry> = entries.iter().map(|e| (e.handle, *e)).collect();
+/// The entities from `first` to `last` of an R2000 block (or the attributes of
+/// an insertion), each naming the next -- or, where the file keeps no links, the
+/// handle after its own. A break in the chain is reported, and what follows it
+/// is not read.
+fn chain(ctx: &Context<'_>, first: u64, last: u64, notes: &mut Notes) -> Vec<u64> {
     let mut order = Vec::new();
+    let mut seen = BTreeSet::new();
     let mut current = first;
     loop {
-        if order.contains(&current) {
+        if !seen.insert(current) {
             notes.add("entity chain that loops");
             break;
         }
@@ -411,9 +470,10 @@ fn chain(
         if current == last {
             break;
         }
-        let next = by_handle
+        let next = ctx
+            .by_handle
             .get(&current)
-            .and_then(|e| read_entity_links(objects, *e, version).ok())
+            .and_then(|e| read_entity_links(ctx.objects, *e, ctx.version).ok())
             .and_then(|links| {
                 if links.stored {
                     links.next
@@ -435,13 +495,95 @@ fn chain(
 /// What converting an entity needs to know about the rest of the drawing.
 struct Context<'a> {
     version: Version,
+    objects: &'a [u8],
+    by_handle: &'a BTreeMap<u64, ObjectEntry>,
     layers: &'a BTreeMap<u64, String>,
     linetypes: &'a BTreeMap<u64, TextValue>,
     styles: &'a BTreeMap<u64, TextValue>,
+    block_names: &'a BTreeMap<u64, String>,
 }
 
 fn point2(p: [f64; 2]) -> Point2D {
     Point2D { x: p[0], y: p[1] }
+}
+
+/// The fields a text, an attribute and an attribute definition share, in the
+/// model's words.
+struct TextFields {
+    start_point: Point2D,
+    height: f64,
+    value: String,
+    rotation: f64,
+    horizontal: HorizontalJustification,
+    vertical: VerticalJustification,
+    alignment: Option<Point2D>,
+    width_factor: f64,
+    oblique: f64,
+    style: Ref<String>,
+    elevation: f64,
+    extrusion: Point3D,
+}
+
+/// `None` (reported) when the text is in a code page this reader cannot turn
+/// into characters.
+fn convert_text(t: &entities::Text, ctx: &Context<'_>, notes: &mut Notes) -> Option<TextFields> {
+    let Some(value) = characters(&t.value) else {
+        notes.add("text in a code page that is not read");
+        return None;
+    };
+    let style = match ctx.styles.get(&t.style) {
+        None => Ref::Unresolved(hex(t.style)),
+        Some(n) => match characters(n) {
+            Some(n) => Ref::Resolved(n),
+            None => Ref::Unresolved(hex(t.style)),
+        },
+    };
+    Some(TextFields {
+        start_point: point2(t.insertion),
+        height: t.height,
+        value,
+        rotation: t.rotation,
+        horizontal: match t.horizontal {
+            1 => HorizontalJustification::Center,
+            2 => HorizontalJustification::Right,
+            3 => HorizontalJustification::Aligned,
+            4 => HorizontalJustification::Middle,
+            5 => HorizontalJustification::Fit,
+            _ => HorizontalJustification::Left,
+        },
+        vertical: match t.vertical {
+            1 => VerticalJustification::Bottom,
+            2 => VerticalJustification::Middle,
+            3 => VerticalJustification::Top,
+            _ => VerticalJustification::Baseline,
+        },
+        // A text justified left on the baseline states no alignment point; any other
+        // justification does, and a file that leaves it out means the origin.
+        alignment: if t.horizontal == 0 && t.vertical == 0 {
+            None
+        } else {
+            Some(point2(t.alignment.unwrap_or([0.0, 0.0])))
+        },
+        width_factor: t.width_factor,
+        oblique: t.oblique,
+        style,
+        elevation: t.elevation,
+        extrusion: point(t.extrusion),
+    })
+}
+
+fn attribute_flags(bits: u8) -> AttributeFlags {
+    AttributeFlags {
+        invisible: bits & 1 != 0,
+        constant: bits & 2 != 0,
+        verify: bits & 4 != 0,
+        preset: bits & 8 != 0,
+    }
+}
+
+/// A tangent the file states, or `None` for the zero vector (which states none).
+fn tangent(t: Option<[f64; 3]>) -> Option<Point3D> {
+    t.filter(|v| v.iter().any(|c| *c != 0.0)).map(point)
 }
 
 /// The model entity for `entity`, or `None` for a kind this reader does not
@@ -449,6 +591,7 @@ fn point2(p: [f64; 2]) -> Point2D {
 fn convert_entity(
     entity: &entities::Entity,
     ctx: &Context<'_>,
+    attribs: &BTreeMap<u64, AttribEntity>,
     notes: &mut Notes,
 ) -> Option<Entity> {
     let common = convert_common(entity, ctx);
@@ -537,45 +680,114 @@ fn convert_entity(
             invisible_edges: Face3DEntity::invisible_edges_from_bits(f.invisible_edges as u32),
         }),
         Geometry::Text(t) => {
-            let Some(text) = characters(&t.value) else {
+            let t = convert_text(t, ctx, notes)?;
+            Entity::Text(TextEntity {
+                common,
+                start_point: t.start_point,
+                text_height: t.height,
+                text: t.value,
+                rotation: t.rotation,
+                horizontal_justification: t.horizontal,
+                vertical_justification: t.vertical,
+                alignment_point: t.alignment,
+                width_factor: t.width_factor,
+                oblique_angle: t.oblique,
+                style_name: t.style,
+                elevation: t.elevation,
+                extrusion: t.extrusion,
+            })
+        }
+        Geometry::Attdef(a) => {
+            let t = convert_text(&a.text, ctx, notes)?;
+            let Some(tag) = characters(&a.tag) else {
+                notes.add("attribute tag in a code page that is not read");
+                return None;
+            };
+            Entity::Attdef(AttdefEntity {
+                common,
+                start_point: t.start_point,
+                text_height: t.height,
+                tag,
+                flags: attribute_flags(a.flags),
+                default_value: t.value,
+                rotation: t.rotation,
+                horizontal_justification: t.horizontal,
+                vertical_justification: t.vertical,
+                alignment_point: t.alignment,
+                width_factor: t.width_factor,
+                oblique_angle: t.oblique,
+                style_name: t.style,
+                elevation: t.elevation,
+                extrusion: t.extrusion,
+            })
+        }
+        Geometry::Insert(i) => {
+            // R2000 names the first and the last attribute and links the rest;
+            // later versions list them all.
+            let handles = match (ctx.version, i.attributes.first(), i.attributes.last()) {
+                (Version::R2000, Some(first), Some(last)) => chain(ctx, *first, *last, notes),
+                _ => i.attributes.clone(),
+            };
+            Entity::Insert(InsertEntity {
+                common,
+                block_name: match ctx.block_names.get(&i.block) {
+                    Some(n) => Ref::Resolved(n.clone()),
+                    None => Ref::Unresolved(hex(i.block)),
+                },
+                insertion_point: point(i.position),
+                scale: point(i.scale),
+                rotation: i.rotation,
+                attribs: handles
+                    .iter()
+                    .filter_map(|h| attribs.get(h).cloned())
+                    .collect(),
+                extrusion: point(i.extrusion),
+            })
+        }
+        Geometry::Mtext(m) => {
+            let Some(text) = characters(&m.value) else {
                 notes.add("text in a code page that is not read");
                 return None;
             };
-            let style_name = match ctx.styles.get(&t.style) {
-                None => Ref::Unresolved(hex(t.style)),
+            let style_name = match ctx.styles.get(&m.style) {
+                None => Ref::Unresolved(hex(m.style)),
                 Some(n) => match characters(n) {
                     Some(n) => Ref::Resolved(n),
-                    None => Ref::Unresolved(hex(t.style)),
+                    None => Ref::Unresolved(hex(m.style)),
                 },
             };
-            Entity::Text(TextEntity {
+            Entity::MText(MTextEntity {
                 common,
-                start_point: point2(t.insertion),
-                text_height: t.height,
+                insertion_point: point(m.insertion),
                 text,
-                rotation: t.rotation,
-                horizontal_justification: match t.horizontal {
-                    1 => HorizontalJustification::Center,
-                    2 => HorizontalJustification::Right,
-                    3 => HorizontalJustification::Aligned,
-                    4 => HorizontalJustification::Middle,
-                    5 => HorizontalJustification::Fit,
-                    _ => HorizontalJustification::Left,
-                },
-                vertical_justification: match t.vertical {
-                    1 => VerticalJustification::Bottom,
-                    2 => VerticalJustification::Middle,
-                    3 => VerticalJustification::Top,
-                    _ => VerticalJustification::Baseline,
-                },
-                alignment_point: t.alignment.map(point2),
-                width_factor: t.width_factor,
-                oblique_angle: t.oblique,
+                text_height: m.text_height,
+                rotation: m.x_axis[1].atan2(m.x_axis[0]),
+                line_spacing_factor: m.line_spacing_factor,
+                attachment: MTextAttachment::from_code(i64::from(m.attachment)),
+                reference_width: m.rect_width,
+                extents_width: Some(m.extents_width),
+                extents_height: Some(m.extents_height),
                 style_name,
-                elevation: t.elevation,
-                extrusion: point(t.extrusion),
             })
         }
+        Geometry::Spline(s) => Entity::Spline(SplineEntity {
+            common,
+            degree: s.degree,
+            // A control-point spline states whether it is closed and periodic; a
+            // fit-point spline states closed from R2013 (its flag), and no periodic.
+            closed: if s.fit_data {
+                (ctx.version >= Version::R2013).then_some(s.flags & 4 != 0)
+            } else {
+                Some(s.closed)
+            },
+            periodic: (!s.fit_data).then_some(s.periodic),
+            knots: s.knots.clone(),
+            weights: s.weights.clone(),
+            fit_points: s.fit_points.iter().copied().map(point).collect(),
+            control_points: s.control_points.iter().copied().map(point).collect(),
+            start_tangent: tangent(s.start_tangent),
+            end_tangent: tangent(s.end_tangent),
+        }),
         _ => return None,
     })
 }
