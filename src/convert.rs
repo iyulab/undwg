@@ -20,6 +20,7 @@ use uncad_model::model::{
     OrdinateAxis, Origin, OverrideValue, Point2D, Point3D, PointEntity, PolylineEntity,
     PolylineVertex, RayEntity, Ref, SolidEntity, SplineEntity, StyleOverride, TextEntity,
     TextOverride, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
+    WipeoutEntity,
 };
 use uncad_model::tables::{
     AngularUnitFormat, ArcSymbol, BlockRecord, DimStyleRecord, ExternalReference, FractionFormat,
@@ -1381,21 +1382,7 @@ fn convert_entity(
             })
         }
         Geometry::Image(i) => {
-            // The file states the clip boundary in pixels (the centre of a pixel is
-            // half a pixel in, and rows count down from the top); the model states
-            // it in the drawing, and a rectangle as its four corners.
-            let to_world = |p: [f64; 2]| Point2D {
-                x: i.insertion[0]
-                    + i.u_vector[0] * (p[0] + 0.5)
-                    + i.v_vector[0] * (i.size[1] - (p[1] + 0.5)),
-                y: i.insertion[1]
-                    + i.u_vector[1] * (p[0] + 0.5)
-                    + i.v_vector[1] * (i.size[1] - (p[1] + 0.5)),
-            };
-            let corners: Vec<[f64; 2]> = match (i.clip_type, i.clip_boundary.as_slice()) {
-                (1, [a, b]) => vec![[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]],
-                (_, points) => points.to_vec(),
-            };
+            let boundary = image_boundary(i);
             Entity::Image(ImageEntity {
                 common,
                 insertion_point: point(i.insertion),
@@ -1412,9 +1399,13 @@ fn convert_entity(
                 contrast: Some(i.contrast),
                 fade: Some(i.fade),
                 clip_outside: i.clip_mode,
-                boundary: corners.into_iter().map(to_world).collect(),
+                boundary,
             })
         }
+        Geometry::Wipeout(i) => Entity::Wipeout(WipeoutEntity {
+            common,
+            boundary: image_boundary(i),
+        }),
         Geometry::Leader(l) => Entity::Leader(LeaderEntity {
             common,
             vertices: l.points.iter().copied().map(point).collect(),
@@ -1439,6 +1430,23 @@ fn convert_entity(
         }),
         _ => return None,
     })
+}
+
+/// The clip boundary of an image (or the outline of a wipeout) in the drawing.
+///
+/// The file states it in pixels (the centre of a pixel is half a pixel in, and
+/// rows count down from the top); the model states it in the drawing, and a
+/// rectangle as its four corners.
+fn image_boundary(i: &entities::Image) -> Vec<Point2D> {
+    let to_world = |p: [f64; 2]| Point2D {
+        x: i.insertion[0] + i.u_vector[0] * (p[0] + 0.5) + i.v_vector[0] * (i.size[1] - 0.5 - p[1]),
+        y: i.insertion[1] + i.u_vector[1] * (p[0] + 0.5) + i.v_vector[1] * (i.size[1] - 0.5 - p[1]),
+    };
+    let corners: Vec<[f64; 2]> = match (i.clip_type, i.clip_boundary.as_slice()) {
+        (1, [a, b]) => vec![[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]],
+        (_, points) => points.to_vec(),
+    };
+    corners.into_iter().map(to_world).collect()
 }
 
 /// A hatch boundary in the model's words.

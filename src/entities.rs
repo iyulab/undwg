@@ -32,6 +32,7 @@ pub const TYPE_TEXT: u16 = 1;
 /// code of their own but are named by a class of the drawing.
 const TYPE_HATCH: u16 = 0x7001;
 const TYPE_IMAGE: u16 = 0x7002;
+const TYPE_WIPEOUT: u16 = 0x7003;
 
 /// The type code of a trace.
 pub const TYPE_TRACE: u16 = 32;
@@ -785,6 +786,9 @@ pub enum Geometry {
     Viewport(Viewport),
     /// A raster image.
     Image(Image),
+    /// A wipeout: a masked area, stated the way a raster image states its frame
+    /// and clip boundary (its definition is none).
+    Wipeout(Image),
     /// A leader.
     Leader(Leader),
     /// A multiline.
@@ -1966,6 +1970,14 @@ pub fn read_entity_with_classes(
     {
         frame.type_code = TYPE_IMAGE;
     }
+    // A wipeout is a raster image with no picture: it states the same fields.
+    if frame.type_code >= 500
+        && classes
+            .iter()
+            .any(|c| i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "WIPEOUT")
+    {
+        frame.type_code = TYPE_WIPEOUT;
+    }
     if !matches!(
         frame.type_code,
         TYPE_ARC
@@ -1995,6 +2007,7 @@ pub fn read_entity_with_classes(
                 | TYPE_3DFACE
                 | TYPE_VIEWPORT
                 | TYPE_IMAGE
+                | TYPE_WIPEOUT
                 | TYPE_LEADER
                 | TYPE_MLINE
     ) {
@@ -2084,6 +2097,7 @@ pub fn read_entity_with_classes(
         TYPE_SOLID => Geometry::Solid(read_solid(&mut r)?),
         TYPE_3DFACE => Geometry::Face3d(read_face3d(&mut r)?),
         TYPE_IMAGE => Geometry::Image(read_image(&mut r, version)?),
+        TYPE_WIPEOUT => Geometry::Wipeout(read_image(&mut r, version)?),
         TYPE_LEADER => Geometry::Leader(read_leader(&mut r, version)?),
         TYPE_MLINE => Geometry::Mline(read_mline(&mut r)?),
         TYPE_VIEWPORT => {
@@ -2185,7 +2199,7 @@ pub fn read_entity_with_classes(
         l.annotation = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
         l.style = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
     }
-    if let Geometry::Image(i) = &mut geometry {
+    if let Geometry::Image(i) | Geometry::Wipeout(i) = &mut geometry {
         i.definition = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
         i.reactor = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
     }
