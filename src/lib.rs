@@ -53,5 +53,8 @@ pub use sections::{
     read_data_page, read_directory, read_section, DataPageHeader, PageMapEntry, SectionDescription,
     SectionDirectory, SectionError, SectionPage,
 };
-pub use tables::{read_block_name, read_dimstyle_name, TYPE_BLOCK_HEADER, TYPE_DIMSTYLE};
+pub use tables::{
+    read_block_name, read_dimstyle_name, read_layer, read_linetype_name, Layer, TableColor,
+    TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE,
+};
 pub use version::{detect_version, Error, Unsupported, Version};

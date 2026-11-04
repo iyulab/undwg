@@ -93,6 +93,13 @@ pub struct CommonEntity {
     pub reactor_count: i32,
     /// The colour number with its flags, as stored.
     pub color: u16,
+    /// The 24-bit RGB value of a true colour (R2004 and later, colour flag `0x8000`).
+    pub rgb: Option<u32>,
+    /// The transparency as stored (R2004 and later, colour flag `0x2000`): a
+    /// long with the type in the top byte and a value in the last byte. Real
+    /// files state `1` (by block) and `2` (a value) there; the specification
+    /// lists `3` for a value.
+    pub transparency: Option<u32>,
     /// The linetype scale.
     pub linetype_scale: f64,
     /// `0` by layer, `1` by block, `2` continuous, `3` a linetype handle is stored.
@@ -816,13 +823,14 @@ fn read_common(
     // R2004 they never are.
     let links_stored = version < Version::R2004 && !r.bit()?;
 
+    let (mut rgb, mut transparency) = (None, None);
     let color = if version >= Version::R2004 {
         let flags = r.bit_short()? as u16;
         if flags & 0x8000 != 0 {
-            r.bit_long()?; // an RGB value
+            rgb = Some(r.bit_long()? as u32 & 0x00FF_FFFF);
         }
         if flags & 0x2000 != 0 {
-            r.bit_long()?; // a transparency
+            transparency = Some(r.bit_long()? as u32);
         }
         flags
     } else {
@@ -850,6 +858,8 @@ fn read_common(
             entity_mode,
             reactor_count,
             color,
+            rgb,
+            transparency,
             linetype_scale,
             linetype_flags,
             plotstyle_flags,

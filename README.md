@@ -32,7 +32,8 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | Block insertions: point, scale, rotation, extrusion (R2000, R2004 and later; the inserted block's name is a handle and is not read yet) | done |
 | Ellipses and elliptical arcs: centre, major axis, ratio, angles (R2000, R2004 and later) | done |
 | Solids (2D filled areas) and 3D faces: corners, extrusion, invisible edges (R2000, R2004 and later) | done |
-| Other entities, tables, blocks, header variables | planned |
+| Layers: name, flags, colour, linetype (R2000, R2004 and later); the colour, linetype, scale, visibility and line weight every entity states | done |
+| Other entities, other tables, blocks, header variables | planned |
 
 Files older than R2000 are an explicit error that names the version bytes it found. Writing DWG is out of scope.
 

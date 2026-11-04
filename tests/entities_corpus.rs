@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use undwg::{
     read_block_name, read_classes, read_dimstyle_name, read_directory, read_entity,
-    read_entity_with_classes, read_header, read_object_frame, read_object_map, read_section,
-    FileHeader, Geometry, HatchEdge, TextValue, Version,
+    read_entity_with_classes, read_header, read_layer, read_linetype_name, read_object_frame,
+    read_object_map, read_section, FileHeader, Geometry, HatchEdge, TextValue, Version,
 };
 
 /// A text as the dump writes it: `U:` and the hex of its UTF-8 for Unicode
@@ -198,6 +198,63 @@ fn every_real_line_circle_and_arc_reads() {
                 Err(err) => panic!("{}: dimension style {:#x}: {err}", path.display(), e.handle),
             })
             .collect();
+        // Every layer and every linetype name; the layers go to the dump once per file.
+        let layers: std::collections::BTreeMap<u64, undwg::Layer> = entries
+            .iter()
+            .filter(|e| e.offset < objects.len() as u64)
+            .filter_map(|e| match read_layer(&objects, *e, version) {
+                Ok(Some(layer)) => Some((e.handle, layer)),
+                Ok(None) => None,
+                Err(err) => panic!("{}: layer {:#x}: {err}", path.display(), e.handle),
+            })
+            .collect();
+        let linetype_names: std::collections::BTreeMap<u64, TextValue> = entries
+            .iter()
+            .filter(|e| e.offset < objects.len() as u64)
+            .filter_map(|e| match read_linetype_name(&objects, *e, version) {
+                Ok(Some(name)) => Some((e.handle, name)),
+                Ok(None) => None,
+                Err(err) => panic!("{}: linetype {:#x}: {err}", path.display(), e.handle),
+            })
+            .collect();
+        for layer in layers.values() {
+            // A layer's references name objects of the right kind.
+            if let Some(owner) = layer.owner {
+                assert_eq!(
+                    types.get(&owner),
+                    Some(&50),
+                    "{}: layer owner",
+                    path.display()
+                );
+            }
+            if let Some(lt) = layer.linetype {
+                assert_eq!(
+                    types.get(&lt),
+                    Some(&57),
+                    "{}: layer linetype",
+                    path.display()
+                );
+            }
+            if let Some(out) = dump.as_mut() {
+                let linetype = layer
+                    .linetype
+                    .and_then(|h| linetype_names.get(&h))
+                    .map(text_hex)
+                    .unwrap_or_default();
+                writeln!(
+                    out,
+                    "{}\t{:X}\tLAYER\t{:?}\t{}\t{}\t{}\t{:?}",
+                    path.display(),
+                    layer.handle,
+                    text_hex(&layer.name),
+                    layer.flags,
+                    layer.color.method,
+                    layer.color.value,
+                    linetype
+                )
+                .unwrap();
+            }
+        }
         // The vertices of 2D and 3D polylines, by handle, with the owner each states.
         let mut vertices_2d = std::collections::BTreeMap::new();
         let mut vertices_3d = std::collections::BTreeMap::new();
@@ -274,6 +331,12 @@ fn every_real_line_circle_and_arc_reads() {
                 );
             };
             expect(refs.layer, 51, "layer");
+            assert!(
+                layers.contains_key(&refs.layer),
+                "{}: {:#x}: the layer has no entry",
+                path.display(),
+                entry.handle
+            );
             if let Some(owner) = refs.owner {
                 // An attribute belongs to the insertion it follows.
                 match entity.geometry {
@@ -802,6 +865,36 @@ fn every_real_line_circle_and_arc_reads() {
             };
             if let Some(out) = dump.as_mut() {
                 writeln!(out, "{}\t{:X}\t{}", path.display(), entry.handle, name).unwrap();
+            }
+            if let Some(out) = dump.as_mut() {
+                // What every entity states: its layer, colour, linetype, scale,
+                // visibility and line weight; an absent value is written as -1.
+                let c = &entity.common;
+                let layer_name = layers
+                    .get(&refs.layer)
+                    .map(|l| text_hex(&l.name))
+                    .unwrap_or_default();
+                let linetype = refs
+                    .linetype
+                    .and_then(|h| linetype_names.get(&h))
+                    .map(text_hex)
+                    .unwrap_or_default();
+                writeln!(
+                    out,
+                    "{}\t{:X}\tCOMMON\t{:?}\t{}\t{}\t{}\t{:?}\t{}\t{:?}\t{}\t{}",
+                    path.display(),
+                    entry.handle,
+                    layer_name,
+                    c.color,
+                    c.rgb.map_or(-1, i64::from),
+                    c.transparency.map_or(-1, i64::from),
+                    c.linetype_scale,
+                    c.linetype_flags,
+                    linetype,
+                    c.invisible,
+                    c.lineweight
+                )
+                .unwrap();
             }
         }
     }
