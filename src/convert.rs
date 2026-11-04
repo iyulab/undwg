@@ -11,11 +11,13 @@ use std::fmt;
 
 use uncad_model::color::ACI_PALETTE;
 use uncad_model::model::{
-    ArcEntity, AttdefEntity, AttribEntity, AttributeFlags, CircleEntity, Confidence, EllipseEntity,
+    ArcEntity, AttdefEntity, AttribEntity, AttributeFlags, CircleEntity, Confidence,
+    DimensionEntity, DimensionKind as ModelDimensionKind, DimensionPoints, EllipseEntity,
     EntityCommon, EntityId, EntityLinetype, Face3DEntity, HorizontalJustification, InsertEntity,
-    LineEntity, LwPolylineEntity, MLineEntity, MLineVertex, MTextAttachment, MTextEntity, Origin,
-    Point2D, Point3D, PointEntity, PolylineEntity, PolylineVertex, RayEntity, Ref, SolidEntity,
-    SplineEntity, TextEntity, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
+    LineEntity, LwPolylineEntity, MLineEntity, MLineVertex, MTextAttachment, MTextEntity,
+    OrdinateAxis, Origin, OverrideValue, Point2D, Point3D, PointEntity, PolylineEntity,
+    PolylineVertex, RayEntity, Ref, SolidEntity, SplineEntity, StyleOverride, TextEntity,
+    TextOverride, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
 };
 use uncad_model::tables::{BlockRecord, ExternalReference, LayerRecord, Tables};
 use uncad_model::text::decode_escapes;
@@ -26,8 +28,8 @@ use crate::drawing::{Drawing, DrawingError};
 use crate::entities::{self, read_entity_links, read_entity_with_classes, Geometry};
 use crate::objects::ObjectEntry;
 use crate::tables::{
-    read_block_control, read_block_header, read_dimstyle_name, read_layer, read_linetype_name,
-    read_mlinestyle_name, read_style_name, BlockHeader, Layer,
+    read_appid_name, read_block_control, read_block_header, read_dimstyle_name, read_layer,
+    read_linetype_name, read_mlinestyle_name, read_style_name, BlockHeader, Layer,
 };
 use crate::version::Version;
 
@@ -142,9 +144,10 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let mut linetypes: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut dim_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
+    let mut acad: Option<u64> = None;
     let mut mline_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut headers: Vec<BlockHeader> = Vec::new();
-    let mut table_order: Vec<u64> = Vec::new();
+    let mut table_order: Vec<Option<u64>> = Vec::new();
     for e in &entries {
         match read_layer(objects, *e, version) {
             Ok(Some(layer)) => {
@@ -201,6 +204,20 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
                 continue;
             }
         }
+        match read_appid_name(objects, *e, version) {
+            Ok(Some(name)) => {
+                if matches!(characters(&name).as_deref(), Some(n) if n.eq_ignore_ascii_case("ACAD"))
+                {
+                    acad = Some(e.handle);
+                }
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                notes.add("application that could not be read");
+                continue;
+            }
+        }
         match read_block_control(objects, *e, version) {
             Ok(Some(order)) => {
                 table_order = order;
@@ -228,7 +245,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let position: BTreeMap<u64, usize> = table_order
         .iter()
         .enumerate()
-        .map(|(i, h)| (*h, i))
+        .filter_map(|(i, h)| h.map(|h| (h, i)))
         .collect();
     for (index, block) in headers.iter().enumerate() {
         let index = position.get(&block.handle).copied().unwrap_or(index);
@@ -327,6 +344,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         styles: &styles,
         dim_styles: &dim_styles,
         mline_styles: &mline_styles,
+        acad,
         block_names: &block_names,
         vertices_2d: &vertices_2d,
         vertices_3d: &vertices_3d,
@@ -544,6 +562,8 @@ struct Context<'a> {
     styles: &'a BTreeMap<u64, TextValue>,
     dim_styles: &'a BTreeMap<u64, TextValue>,
     mline_styles: &'a BTreeMap<u64, TextValue>,
+    /// The handle of the application named ACAD, which keeps dimension overrides.
+    acad: Option<u64>,
     block_names: &'a BTreeMap<u64, String>,
     vertices_2d: &'a BTreeMap<u64, entities::Vertex2d>,
     vertices_3d: &'a BTreeMap<u64, entities::Vertex3d>,
@@ -645,6 +665,138 @@ fn attribute_flags(bits: u8) -> AttributeFlags {
         verify: bits & 4 != 0,
         preset: bits & 8 != 0,
     }
+}
+
+/// The dimension-style variables a dimension sets for itself: the `DSTYLE`
+/// list in its `ACAD` extended data, as (variable, value) pairs. An entity
+/// without one sets none; data that does not read as the format describes it
+/// ends the list there.
+fn style_overrides(entity: &entities::Entity, ctx: &Context<'_>) -> Vec<StyleOverride> {
+    let unicode = ctx.version >= Version::R2007;
+    let mut out = Vec::new();
+    for data in &entity.common.extended_data {
+        if Some(data.application) != ctx.acad {
+            continue;
+        }
+        let items = extended_items(&data.bytes, unicode);
+        // `1000 DSTYLE`, `1002 {`, pairs of a `1070` variable and a value, `1002 }`.
+        let mut it = items.into_iter();
+        if !matches!(it.next(), Some(Item::Text(t)) if t == "DSTYLE") {
+            continue;
+        }
+        if !matches!(it.next(), Some(Item::Brace(false))) {
+            continue;
+        }
+        while let Some(Item::Integer(variable)) = it.next() {
+            let value = match it.next() {
+                Some(Item::Real(v)) => OverrideValue::Real(v),
+                Some(Item::Integer(v)) => OverrideValue::Integer(v),
+                Some(Item::Text(t)) => OverrideValue::Text(t),
+                Some(Item::Handle(h)) => OverrideValue::Handle(hex(h)),
+                _ => break,
+            };
+            if let Ok(variable) = u16::try_from(variable) {
+                out.push(StyleOverride { variable, value });
+            }
+        }
+    }
+    out
+}
+
+/// One item of an application's extended data.
+enum Item {
+    Text(String),
+    /// `1002`: `false` opens a group, `true` closes it.
+    Brace(bool),
+    Integer(i32),
+    Real(f64),
+    Handle(u64),
+    /// Anything else the format allows (binary chunks, points, layer handles):
+    /// it is skipped over, not read.
+    Other,
+}
+
+/// The items of an application's extended data. Reading stops at the first
+/// item the format does not describe.
+fn extended_items(bytes: &[u8], unicode: bool) -> Vec<Item> {
+    let mut items = Vec::new();
+    let mut i = 0usize;
+    let take = |i: &mut usize, n: usize| -> Option<&[u8]> {
+        let slice = bytes.get(*i..i.checked_add(n)?)?;
+        *i += n;
+        Some(slice)
+    };
+    while let Some(code) = bytes.get(i).copied() {
+        i += 1;
+        let item = match code {
+            0 => {
+                let text = if unicode {
+                    let len =
+                        take(&mut i, 2).map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])));
+                    len.and_then(|n| take(&mut i, n * 2)).and_then(|b| {
+                        let units: Vec<u16> = (0..b.len() / 2)
+                            .map(|k| u16::from_le_bytes([b[2 * k], b[2 * k + 1]]))
+                            .collect();
+                        String::from_utf16(&units).ok()
+                    })
+                } else {
+                    let len = take(&mut i, 1).map(|b| usize::from(b[0]));
+                    len.and_then(|n| take(&mut i, 2).and(take(&mut i, n)))
+                        .and_then(|b| {
+                            b.is_ascii()
+                                .then(|| String::from_utf8_lossy(b).into_owned())
+                        })
+                };
+                match text {
+                    Some(t) => Item::Text(t),
+                    None => break,
+                }
+            }
+            2 => match take(&mut i, 1) {
+                Some(b) => Item::Brace(b[0] != 0),
+                None => break,
+            },
+            3 | 5 => match take(&mut i, 8) {
+                Some(b) => {
+                    let h = u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+                    if code == 5 {
+                        Item::Handle(h)
+                    } else {
+                        Item::Other
+                    }
+                }
+                None => break,
+            },
+            4 => match take(&mut i, 1)
+                .map(|b| usize::from(b[0]))
+                .and_then(|n| take(&mut i, n))
+            {
+                Some(_) => Item::Other,
+                None => break,
+            },
+            10..=13 => match take(&mut i, 24) {
+                Some(_) => Item::Other,
+                None => break,
+            },
+            40..=42 => match take(&mut i, 8) {
+                Some(b) => Item::Real(f64::from_le_bytes([
+                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                ])),
+                None => break,
+            },
+            70 => match take(&mut i, 2) {
+                Some(b) => Item::Integer(i32::from(i16::from_le_bytes([b[0], b[1]]))),
+                None => break,
+            },
+            71 => match take(&mut i, 4) {
+                Some(b) => Item::Integer(i32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+                None => break,
+            },
+            _ => break,
+        };
+        items.push(item);
+    }
+    items
 }
 
 /// A tangent the file states, or `None` for the zero vector (which states none).
@@ -938,6 +1090,64 @@ fn convert_entity(
                 })
                 .collect(),
         }),
+        Geometry::Dimension(d) => {
+            let text_override = match characters(&d.user_text) {
+                None => {
+                    notes.add("text in a code page that is not read");
+                    return None;
+                }
+                Some(t) if t.is_empty() || t == "<>" => TextOverride::Measured,
+                Some(t) if t == " " => TextOverride::Suppressed,
+                Some(t) => TextOverride::Literal(t),
+            };
+            let at_elevation = |p: [f64; 2]| Point3D {
+                x: p[0],
+                y: p[1],
+                z: d.elevation,
+            };
+            Entity::Dimension(DimensionEntity {
+                common,
+                block_name: match d.block {
+                    None => Ref::Absent,
+                    Some(h) => match ctx.block_names.get(&h) {
+                        Some(n) => Ref::Resolved(n.clone()),
+                        None => Ref::Unresolved(hex(h)),
+                    },
+                },
+                kind: Some(match d.kind {
+                    entities::DimensionKind::Linear => ModelDimensionKind::Rotated,
+                    entities::DimensionKind::Aligned => ModelDimensionKind::Aligned,
+                    entities::DimensionKind::Angular2Line => ModelDimensionKind::Angular2Line,
+                    entities::DimensionKind::Diameter => ModelDimensionKind::Diameter,
+                    entities::DimensionKind::Radius => ModelDimensionKind::Radius,
+                    entities::DimensionKind::Angular3Point => ModelDimensionKind::Angular3Point,
+                    entities::DimensionKind::Ordinate => ModelDimensionKind::Ordinate,
+                }),
+                // A measurement is a length or an angle, never negative: a writer that
+                // did not measure the dimension stores -1.
+                measurement: (d.measurement >= 0.0).then_some(d.measurement),
+                text_override,
+                definition_point: Some(point(d.definition_point)),
+                text_midpoint: point2(d.text_midpoint),
+                points: DimensionPoints {
+                    extension1: d.point13.map(point),
+                    extension2: d.point14.map(point),
+                    radial: d.point15.map(point),
+                    arc: d.point16.map(at_elevation),
+                },
+                rotation: d.rotation.unwrap_or(0.0),
+                text_rotation: d.text_rotation,
+                style_name: named(ctx.dim_styles, d.style),
+                ordinate_axis: d.ordinate_flags.map(|f| {
+                    if f & 1 != 0 {
+                        OrdinateAxis::X
+                    } else {
+                        OrdinateAxis::Y
+                    }
+                }),
+                style_overrides: Some(style_overrides(entity, ctx)),
+            })
+        }
         _ => return None,
     })
 }

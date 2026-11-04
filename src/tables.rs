@@ -14,6 +14,8 @@ pub const TYPE_BLOCK_HEADER: u16 = 49;
 
 /// The type code of a layer.
 pub const TYPE_LAYER: u16 = 51;
+/// The type code of a registered application.
+pub const TYPE_APPID: u16 = 67;
 /// The type code of a text style.
 pub const TYPE_STYLE: u16 = 53;
 
@@ -44,12 +46,13 @@ pub const TYPE_BLOCK_CONTROL: u16 = 48;
 
 /// Reads the block table's control object at `entry`: the handles of the block
 /// headers in table order -- the blocks the file counts, then model space and
-/// paper space. `Ok(None)` when the object is of another kind.
+/// paper space. A place the table has emptied (a deleted block) is `None`, and
+/// still counts. `Ok(None)` when the object is of another kind.
 pub fn read_block_control(
     objects: &[u8],
     entry: ObjectEntry,
     version: Version,
-) -> Result<Option<Vec<u64>>, ObjectError> {
+) -> Result<Option<Vec<Option<u64>>>, ObjectError> {
     let Some(Prefix {
         mut r,
         layout,
@@ -93,9 +96,7 @@ pub fn read_block_control(
     let mut order = Vec::with_capacity(count + 2);
     // The listed blocks, then model space and paper space.
     for _ in 0..count + 2 {
-        if let Some(handle) = handles.next()? {
-            order.push(handle);
-        }
+        order.push(handles.next()?);
     }
     Ok(Some(order))
 }
@@ -108,6 +109,16 @@ pub fn read_dimstyle_name(
     version: Version,
 ) -> Result<Option<TextValue>, ObjectError> {
     read_table_name(objects, entry, version, TYPE_DIMSTYLE)
+}
+
+/// Reads the name of the registered application at `entry`; `Ok(None)` when
+/// the object is of another kind.
+pub fn read_appid_name(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<Option<TextValue>, ObjectError> {
+    read_table_name(objects, entry, version, TYPE_APPID)
 }
 
 /// Reads the name of the text style at `entry`; `Ok(None)` when the object is

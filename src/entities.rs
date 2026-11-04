@@ -15,7 +15,7 @@
 
 use crate::bits::{BitError, BitReader, TextValue};
 use crate::classes::ClassDef;
-use crate::objects::{open_object, skip_extended_data, ObjectEntry, ObjectError};
+use crate::objects::{open_object, read_extended_data, ExtendedData, ObjectEntry, ObjectError};
 use crate::version::Version;
 
 /// The type code of an arc.
@@ -117,6 +117,8 @@ pub struct CommonEntity {
     pub invisible: i16,
     /// The line weight code (R2000 and later).
     pub lineweight: u8,
+    /// The extended data attached to the entity, one item per application.
+    pub extended_data: Vec<ExtendedData>,
 }
 
 /// A line.
@@ -813,7 +815,7 @@ fn read_common(
     }
     let handle = r.handle()?.value;
 
-    skip_extended_data(r)?;
+    let extended_data = read_extended_data(r)?;
 
     // A stored graphic, skipped.
     if r.bit()? {
@@ -888,6 +890,7 @@ fn read_common(
             plotstyle_flags,
             invisible,
             lineweight,
+            extended_data,
         },
         HandleFlags {
             xdictionary_stored,

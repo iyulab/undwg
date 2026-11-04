@@ -54,16 +54,19 @@ pub use header::{
     SECTION_PAGE_MAP_BIAS,
 };
 pub use lz::LzError;
-pub use objects::{read_object_frame, read_object_map, ObjectEntry, ObjectError, ObjectFrame};
+pub use objects::{
+    read_object_frame, read_object_map, ExtendedData, ObjectEntry, ObjectError, ObjectFrame,
+};
 pub use sections::{
     read_data_page, read_directory, read_section, DataPageHeader, PageMapEntry, SectionDescription,
     SectionDirectory, SectionError, SectionPage,
 };
 pub use tables::{
-    read_block_control, read_block_header, read_block_name, read_dim_style, read_dimstyle_name,
-    read_image_definition, read_layer, read_linetype_name, read_mlinestyle_name, read_style_name,
-    BlockHeader, DimStyle, ImageDefinition, Layer, TableColor, TYPE_BLOCK_CONTROL,
-    TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE, TYPE_MLINESTYLE, TYPE_STYLE,
+    read_appid_name, read_block_control, read_block_header, read_block_name, read_dim_style,
+    read_dimstyle_name, read_image_definition, read_layer, read_linetype_name,
+    read_mlinestyle_name, read_style_name, BlockHeader, DimStyle, ImageDefinition, Layer,
+    TableColor, TYPE_APPID, TYPE_BLOCK_CONTROL, TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER,
+    TYPE_LINETYPE, TYPE_MLINESTYLE, TYPE_STYLE,
 };
 pub use variables::{
     read_header_variables, ControlHandles, DimensionVariables, ExtendedVariables, HeaderColor,

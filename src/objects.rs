@@ -318,6 +318,36 @@ pub(crate) fn open_object<'a>(
     ))
 }
 
+/// The extended data one application attached to an object: the handle of the
+/// application's table entry and the bytes of its data items (see the
+/// specification's chapter on extended entity data).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendedData {
+    /// The handle of the registered application the data belongs to.
+    pub application: u64,
+    /// The data items, as stored: each a one-byte code (the group code minus
+    /// 1000) followed by its value.
+    pub bytes: Vec<u8>,
+}
+
+/// Reads the extended data an object or entity opens with: sizes, each
+/// followed by an application handle and that many bytes, until a size of zero.
+pub(crate) fn read_extended_data(r: &mut BitReader<'_>) -> Result<Vec<ExtendedData>, BitError> {
+    let mut out = Vec::new();
+    let mut size = r.bit_short()?;
+    while size > 0 {
+        let application = r.handle()?.value;
+        let mut bytes =
+            Vec::with_capacity(usize::try_from(size).unwrap_or(0).min(r.remaining() / 8));
+        for _ in 0..size {
+            bytes.push(r.raw_char()?);
+        }
+        out.push(ExtendedData { application, bytes });
+        size = r.bit_short()?;
+    }
+    Ok(out)
+}
+
 /// Skips the extended data an object or entity opens with: sizes, each
 /// followed by an application handle and that many bytes, until a size of zero.
 pub(crate) fn skip_extended_data(r: &mut BitReader<'_>) -> Result<(), BitError> {
