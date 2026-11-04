@@ -14,4 +14,6 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `BitReader`: the bit-packed value forms the format uses -- bit, bit triplet, bitshort, bitlong, bitlonglong, bitdouble (with and without a default), raw values at any bit alignment, modular chars and shorts, handle references, object types. Reading past the end of the data and the codes the format marks as unused are errors, never a zero.
 - `read_classes`: the class definitions of an R2004, R2010, R2013 or R2018 file, with the section's checksum checked and, from R2010, the main stream and the string stream required to meet where they should.
 - A corpus test that reads the class definitions of every R2004-family file.
+- `read_object_map`, `read_object_frame`: the object map (checksummed blocks of handle and position increments) and the frame of each object -- its size, its type code and its checksum. An entry whose position lies outside the object data is left for the caller to see; an object whose checksum or size does not hold is an error, not a guess.
+- A corpus test over the object maps and object frames of real files.
 - A corpus test that reads the table of contents of every R2004-family file, checks every listed page, assembles every section, and checks that the header and class sections open with their documented sentinels.

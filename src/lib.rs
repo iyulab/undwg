@@ -23,6 +23,7 @@ mod checksum;
 mod classes;
 mod header;
 mod lz;
+mod objects;
 mod sections;
 mod version;
 
@@ -33,6 +34,7 @@ pub use header::{
     SECTION_PAGE_MAP_BIAS,
 };
 pub use lz::LzError;
+pub use objects::{read_object_frame, read_object_map, ObjectEntry, ObjectError, ObjectFrame};
 pub use sections::{
     read_data_page, read_directory, read_section, DataPageHeader, PageMapEntry, SectionDescription,
     SectionDirectory, SectionError, SectionPage,
