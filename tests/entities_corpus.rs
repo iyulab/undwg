@@ -112,8 +112,11 @@ fn every_real_line_circle_and_arc_reads() {
         mut polylines_2d,
         mut polylines_3d,
         mut vertices,
+        mut others,
         mut failed,
-    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
+    ) = (
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize,
+    );
     let mut named_blocks = 0usize;
     let mut references_checked = 0usize;
     for path in &files {
@@ -213,7 +216,7 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 35 | 36 | 44 | 77)
+            if !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 40 | 41 | 44 | 46 | 77)
             {
                 continue;
             }
@@ -276,6 +279,11 @@ fn every_real_line_circle_and_arc_reads() {
             }
             if let Geometry::Text(t) = &entity.geometry {
                 expect(t.style, 53, "text style");
+            }
+            if let Geometry::Tolerance(t) = &entity.geometry {
+                if let Some(style) = t.style {
+                    expect(style, 69, "tolerance style");
+                }
             }
             if let Geometry::Mtext(m) = &entity.geometry {
                 expect(m.style, 53, "multiline text style");
@@ -495,6 +503,47 @@ fn every_real_line_circle_and_arc_reads() {
                         flat
                     )
                 }
+                Geometry::Trace(d) => {
+                    others += 1;
+                    assert!(
+                        d.corners.iter().all(|c| c.iter().all(|v| v.is_finite())),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    let flat: Vec<f64> = d.corners.iter().flatten().copied().collect();
+                    format!("TRACE\t{:?}\t{:?}\t{:?}", d.elevation, flat, d.extrusion)
+                }
+                Geometry::Ray(l) | Geometry::Xline(l) => {
+                    others += 1;
+                    assert!(
+                        finite(&l.point) && finite(&l.vector),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    let kind = if matches!(entity.geometry, Geometry::Ray(_)) {
+                        "RAY"
+                    } else {
+                        "XLINE"
+                    };
+                    format!("{kind}\t{:?}\t{:?}", l.point, l.vector)
+                }
+                Geometry::Tolerance(t) => {
+                    others += 1;
+                    assert!(
+                        finite(&t.insertion) && finite(&t.x_direction),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    format!(
+                        "TOLERANCE\t{:?}\t{:?}\t{:?}",
+                        t.insertion,
+                        t.x_direction,
+                        text_hex(&t.text)
+                    )
+                }
                 Geometry::Vertex2d(_) | Geometry::Vertex3d(_) => {
                     vertices += 1;
                     continue;
@@ -635,7 +684,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions, {splines} splines, {polylines_2d} 2D and {polylines_3d} 3D polylines with {vertices} vertices read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions, {splines} splines, {polylines_2d} 2D and {polylines_3d} 3D polylines with {vertices} vertices, {others} traces, rays, infinite lines and tolerances read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");

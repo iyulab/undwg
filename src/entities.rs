@@ -27,6 +27,14 @@ pub const TYPE_LINE: u16 = 19;
 pub const TYPE_POINT: u16 = 27;
 /// The type code of a text.
 pub const TYPE_TEXT: u16 = 1;
+/// The type code of a trace.
+pub const TYPE_TRACE: u16 = 32;
+/// The type code of a ray.
+pub const TYPE_RAY: u16 = 40;
+/// The type code of an infinite line.
+pub const TYPE_XLINE: u16 = 41;
+/// The type code of a geometric tolerance.
+pub const TYPE_TOLERANCE: u16 = 46;
 /// The type code of a vertex of a 2D polyline.
 pub const TYPE_VERTEX_2D: u16 = 10;
 /// The type code of a vertex of a 3D polyline.
@@ -222,6 +230,30 @@ pub struct Text {
     pub vertical: i16,
     /// The handle of the text style.
     pub style: u64,
+}
+
+/// A ray (a half line) or an infinite line: a point and the direction it runs in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InfiniteLine {
+    /// The point the line passes through (the start of a ray).
+    pub point: [f64; 3],
+    /// The direction.
+    pub vector: [f64; 3],
+}
+
+/// A geometric tolerance frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tolerance {
+    /// The insertion point.
+    pub insertion: [f64; 3],
+    /// The direction the text runs along.
+    pub x_direction: [f64; 3],
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// The text of the frame, with its formatting codes as stored.
+    pub text: TextValue,
+    /// The handle of the dimension style.
+    pub style: Option<u64>,
 }
 
 /// A 2D polyline: the settings of the whole line. Its vertices are objects of
@@ -573,6 +605,14 @@ pub enum Geometry {
     Dimension(Dimension),
     /// A spline.
     Spline(Spline),
+    /// A trace: a filled area like a solid.
+    Trace(Solid),
+    /// A ray.
+    Ray(InfiniteLine),
+    /// An infinite line.
+    Xline(InfiniteLine),
+    /// A geometric tolerance frame.
+    Tolerance(Tolerance),
     /// A 2D polyline.
     Polyline2d(Polyline2d),
     /// A 3D polyline.
@@ -944,6 +984,26 @@ fn skip_color(r: &mut BitReader<'_>, strings: &mut Option<BitReader<'_>>) -> Res
         text_value(r, strings)?;
     }
     Ok(())
+}
+
+/// Reads a geometric tolerance. R13 and R14 state three more values first.
+fn read_tolerance(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+) -> Result<Tolerance, BitError> {
+    if version < Version::R2000 {
+        r.bit_short()?;
+        r.bit_double()?;
+        r.bit_double()?;
+    }
+    Ok(Tolerance {
+        insertion: r.point_3bd()?,
+        x_direction: r.point_3bd()?,
+        extrusion: r.point_3bd()?,
+        text: text_value(r, strings)?,
+        style: None,
+    })
 }
 
 /// Reads a 2D polyline; the second value is the count of vertices it owns (R2004 and later).
@@ -1497,6 +1557,10 @@ pub fn read_entity(
             | TYPE_INSERT
             | TYPE_TEXT
             | TYPE_MTEXT
+            | TYPE_TRACE
+            | TYPE_RAY
+            | TYPE_XLINE
+            | TYPE_TOLERANCE
             | TYPE_SPLINE
             | TYPE_POLYLINE_2D
             | TYPE_POLYLINE_3D
@@ -1550,6 +1614,19 @@ pub fn read_entity(
             Geometry::Dimension(read_dimension(&mut r, &mut strings, version, kind)?)
         }
         TYPE_SPLINE => Geometry::Spline(read_spline(&mut r, version)?),
+        TYPE_TRACE => Geometry::Trace(read_solid(&mut r)?),
+        TYPE_RAY | TYPE_XLINE => {
+            let line = InfiniteLine {
+                point: r.point_3bd()?,
+                vector: r.point_3bd()?,
+            };
+            if frame.type_code == TYPE_RAY {
+                Geometry::Ray(line)
+            } else {
+                Geometry::Xline(line)
+            }
+        }
+        TYPE_TOLERANCE => Geometry::Tolerance(read_tolerance(&mut r, &mut strings, version)?),
         TYPE_POLYLINE_2D => {
             let (polyline, count) = read_polyline_2d(&mut r, version)?;
             owned = count;
@@ -1627,6 +1704,9 @@ pub fn read_entity(
             }
         }
         *sequence_end = h.handle()?.resolve(common.handle).filter(|&v| v != 0);
+    }
+    if let Geometry::Tolerance(t) = &mut geometry {
+        t.style = h.handle()?.resolve(common.handle).filter(|&v| v != 0);
     }
     if let Geometry::Dimension(d) = &mut geometry {
         // A null handle (zero) names nothing.
