@@ -13,9 +13,9 @@ use uncad_model::color::ACI_PALETTE;
 use uncad_model::model::{
     ArcEntity, AttdefEntity, AttribEntity, AttributeFlags, CircleEntity, Confidence, EllipseEntity,
     EntityCommon, EntityId, EntityLinetype, Face3DEntity, HorizontalJustification, InsertEntity,
-    LineEntity, LwPolylineEntity, MTextAttachment, MTextEntity, Origin, Point2D, Point3D,
-    PointEntity, PolylineVertex, RayEntity, Ref, SolidEntity, SplineEntity, TextEntity,
-    VerticalJustification,
+    LineEntity, LwPolylineEntity, MLineEntity, MLineVertex, MTextAttachment, MTextEntity, Origin,
+    Point2D, Point3D, PointEntity, PolylineEntity, PolylineVertex, RayEntity, Ref, SolidEntity,
+    SplineEntity, TextEntity, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
 };
 use uncad_model::tables::{BlockRecord, ExternalReference, LayerRecord, Tables};
 use uncad_model::text::decode_escapes;
@@ -26,8 +26,8 @@ use crate::drawing::{Drawing, DrawingError};
 use crate::entities::{self, read_entity_links, read_entity_with_classes, Geometry};
 use crate::objects::ObjectEntry;
 use crate::tables::{
-    read_block_control, read_block_header, read_layer, read_linetype_name, read_style_name,
-    BlockHeader, Layer,
+    read_block_control, read_block_header, read_dimstyle_name, read_layer, read_linetype_name,
+    read_mlinestyle_name, read_style_name, BlockHeader, Layer,
 };
 use crate::version::Version;
 
@@ -141,6 +141,8 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let mut layers: BTreeMap<u64, Layer> = BTreeMap::new();
     let mut linetypes: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut styles: BTreeMap<u64, TextValue> = BTreeMap::new();
+    let mut dim_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
+    let mut mline_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut headers: Vec<BlockHeader> = Vec::new();
     let mut table_order: Vec<u64> = Vec::new();
     for e in &entries {
@@ -174,6 +176,28 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             Ok(None) => {}
             Err(_) => {
                 notes.add("text style that could not be read");
+                continue;
+            }
+        }
+        match read_dimstyle_name(objects, *e, version) {
+            Ok(Some(name)) => {
+                dim_styles.insert(e.handle, name);
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                notes.add("dimension style that could not be read");
+                continue;
+            }
+        }
+        match read_mlinestyle_name(objects, *e, version) {
+            Ok(Some(name)) => {
+                mline_styles.insert(e.handle, name);
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                notes.add("multiline style that could not be read");
                 continue;
             }
         }
@@ -280,6 +304,20 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             Err(e) => notes.add(format!("entity that could not be read ({e})")),
         }
     }
+    // The vertices of polylines, which the polyline that owns them takes.
+    let mut vertices_2d: BTreeMap<u64, entities::Vertex2d> = BTreeMap::new();
+    let mut vertices_3d: BTreeMap<u64, entities::Vertex3d> = BTreeMap::new();
+    for entity in &read {
+        match &entity.geometry {
+            Geometry::Vertex2d(v) => {
+                vertices_2d.insert(entity.common.handle, v.clone());
+            }
+            Geometry::Vertex3d(v) => {
+                vertices_3d.insert(entity.common.handle, v.clone());
+            }
+            _ => {}
+        }
+    }
     let ctx = Context {
         version,
         objects,
@@ -287,7 +325,11 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         layers: &layer_names,
         linetypes: &linetypes,
         styles: &styles,
+        dim_styles: &dim_styles,
+        mline_styles: &mline_styles,
         block_names: &block_names,
+        vertices_2d: &vertices_2d,
+        vertices_3d: &vertices_3d,
     };
 
     // The attributes first: an insertion takes the ones it lists.
@@ -500,7 +542,11 @@ struct Context<'a> {
     layers: &'a BTreeMap<u64, String>,
     linetypes: &'a BTreeMap<u64, TextValue>,
     styles: &'a BTreeMap<u64, TextValue>,
+    dim_styles: &'a BTreeMap<u64, TextValue>,
+    mline_styles: &'a BTreeMap<u64, TextValue>,
     block_names: &'a BTreeMap<u64, String>,
+    vertices_2d: &'a BTreeMap<u64, entities::Vertex2d>,
+    vertices_3d: &'a BTreeMap<u64, entities::Vertex3d>,
 }
 
 fn point2(p: [f64; 2]) -> Point2D {
@@ -570,6 +616,26 @@ fn convert_text(t: &entities::Text, ctx: &Context<'_>, notes: &mut Notes) -> Opt
         elevation: t.elevation,
         extrusion: point(t.extrusion),
     })
+}
+
+/// The name a handle points at in a table of names, as a model reference.
+fn named(table: &BTreeMap<u64, TextValue>, handle: Option<u64>) -> Ref<String> {
+    match handle {
+        None => Ref::Absent,
+        Some(h) => match table.get(&h).and_then(characters) {
+            Some(n) => Ref::Resolved(n),
+            None => Ref::Unresolved(hex(h)),
+        },
+    }
+}
+
+/// The handles of the objects an entity owns (its vertices): all of them from
+/// R2004; R2000 names the first and the last and links the rest.
+fn owned(ctx: &Context<'_>, handles: &[u64], notes: &mut Notes) -> Vec<u64> {
+    match (ctx.version, handles.first(), handles.last()) {
+        (Version::R2000, Some(first), Some(last)) => chain(ctx, *first, *last, notes),
+        _ => handles.to_vec(),
+    }
 }
 
 fn attribute_flags(bits: u8) -> AttributeFlags {
@@ -787,6 +853,90 @@ fn convert_entity(
             control_points: s.control_points.iter().copied().map(point).collect(),
             start_tangent: tangent(s.start_tangent),
             end_tangent: tangent(s.end_tangent),
+        }),
+        Geometry::Polyline2d(p) => {
+            let vertices: Vec<PolylineVertex> = owned(ctx, &p.vertices, notes)
+                .iter()
+                .filter_map(|h| ctx.vertices_2d.get(h))
+                .map(|v| PolylineVertex {
+                    point: Point2D {
+                        x: v.point[0],
+                        y: v.point[1],
+                    },
+                    bulge: v.bulge,
+                    start_width: v.start_width,
+                    end_width: v.end_width,
+                })
+                .collect();
+            Entity::Polyline2D(LwPolylineEntity {
+                common,
+                vertices,
+                closed: p.flags & 1 != 0,
+                const_width: 0.0,
+                elevation: p.elevation,
+                extrusion: point(p.extrusion),
+            })
+        }
+        Geometry::Polyline3d(p) => Entity::Polyline3D(PolylineEntity {
+            common,
+            vertices: owned(ctx, &p.vertices, notes)
+                .iter()
+                .filter_map(|h| ctx.vertices_3d.get(h))
+                .map(|v| point(v.point))
+                .collect(),
+            closed: p.closed_flags & 1 != 0,
+        }),
+        Geometry::Tolerance(t) => {
+            let Some(text_value) = characters(&t.text) else {
+                notes.add("text in a code page that is not read");
+                return None;
+            };
+            Entity::Tolerance(ToleranceEntity {
+                common,
+                insertion_point: point(t.insertion),
+                text_height: None,
+                text_value,
+                direction: Some(point(t.x_direction)),
+                style_name: named(ctx.dim_styles, t.style),
+            })
+        }
+        Geometry::Mline(m) => Entity::MLine(MLineEntity {
+            common,
+            vertices: m
+                .vertices
+                .iter()
+                .map(|v| MLineVertex {
+                    point: point(v.point),
+                    miter_direction: point(v.miter),
+                })
+                .collect(),
+            closed: m.open_closed == 3,
+            mlinestyle_name: named(ctx.mline_styles, m.style),
+            scale: Some(m.scale),
+        }),
+        Geometry::Viewport(v) => Entity::Viewport(ViewportEntity {
+            common,
+            center: point(v.center),
+            width: v.width,
+            height: v.height,
+            view: Some(ViewportView {
+                center: point2(v.view_center),
+                height: v.view_height,
+                target: point(v.view_target),
+                direction: point(v.view_direction),
+                twist: v.view_twist,
+                lens_length: v.lens_length,
+            }),
+            on: Some(v.status_flags & 0x20000 == 0),
+            viewport_id: None,
+            frozen_layers: v
+                .frozen_layers
+                .iter()
+                .map(|h| match ctx.layers.get(h) {
+                    Some(n) => Ref::Resolved(n.clone()),
+                    None => Ref::Unresolved(hex(*h)),
+                })
+                .collect(),
         }),
         _ => return None,
     })
