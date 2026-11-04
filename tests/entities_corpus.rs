@@ -12,9 +12,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use undwg::{
-    read_block_name, read_classes, read_dimstyle_name, read_directory, read_entity,
-    read_entity_with_classes, read_header, read_layer, read_linetype_name, read_object_frame,
-    read_object_map, read_section, FileHeader, Geometry, HatchEdge, TextValue, Version,
+    read_block_header, read_block_name, read_classes, read_dimstyle_name, read_directory,
+    read_entity, read_entity_with_classes, read_header, read_layer, read_linetype_name,
+    read_object_frame, read_object_map, read_section, FileHeader, Geometry, HatchEdge, TextValue,
+    Version,
 };
 
 /// A text as the dump writes it: `U:` and the hex of its UTF-8 for Unicode
@@ -251,6 +252,43 @@ fn every_real_line_circle_and_arc_reads() {
                     layer.color.method,
                     layer.color.value,
                     linetype
+                )
+                .unwrap();
+            }
+        }
+        // Every block header, to name the block an entity belongs to; written to the dump once per file.
+        let block_headers: std::collections::BTreeMap<u64, undwg::BlockHeader> = entries
+            .iter()
+            .filter(|e| e.offset < objects.len() as u64)
+            .filter_map(|e| match read_block_header(&objects, *e, version) {
+                Ok(Some(block)) => Some((e.handle, block)),
+                Ok(None) => None,
+                Err(err) => panic!("{}: block header {:#x}: {err}", path.display(), e.handle),
+            })
+            .collect();
+        for block in block_headers.values() {
+            if let Some(owner) = block.owner {
+                assert_eq!(
+                    types.get(&owner),
+                    Some(&48),
+                    "{}: block owner",
+                    path.display()
+                );
+            }
+            if let Some(out) = dump.as_mut() {
+                let flags = u8::from(block.anonymous)
+                    | u8::from(block.has_attribute_definitions) << 1
+                    | u8::from(block.is_xref) << 2
+                    | u8::from(block.xref_overlaid) << 3;
+                writeln!(
+                    out,
+                    "{}\t{:X}\tBLOCK\t{:?}\t{}\t{:?}\t{:?}",
+                    path.display(),
+                    block.handle,
+                    text_hex(&block.name),
+                    flags,
+                    block.base_point,
+                    text_hex(&block.xref_path)
                 )
                 .unwrap();
             }
@@ -870,6 +908,22 @@ fn every_real_line_circle_and_arc_reads() {
                 // What every entity states: its layer, colour, linetype, scale,
                 // visibility and line weight; an absent value is written as -1.
                 let c = &entity.common;
+                // The block an entity belongs to: paper space (1) and model space (2) state no owner;
+                // an entity in a block states the block header; an attribute or a vertex states an entity.
+                let owner_block = refs
+                    .owner
+                    .and_then(|o| block_headers.get(&o))
+                    .map(|b| text_hex(&b.name))
+                    .unwrap_or_default();
+                writeln!(
+                    out,
+                    "{}\t{:X}\tOWNER\t{}\t{:?}",
+                    path.display(),
+                    entry.handle,
+                    entity.common.entity_mode,
+                    owner_block
+                )
+                .unwrap();
                 let layer_name = layers
                     .get(&refs.layer)
                     .map(|l| text_hex(&l.name))

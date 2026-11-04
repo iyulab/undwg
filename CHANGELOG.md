@@ -39,3 +39,4 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `read_linetype_name`: the name of a linetype, so that the linetype an entity or a layer points to can be named.
 - `CommonEntity::rgb` and `CommonEntity::transparency`: the true colour and the transparency an entity states, which were skipped until now.
 - The corpus test checks that every layer an entity names has an entry and that a layer's owner and linetype are objects of the right kind.
+- `read_block_header`: a block header -- its name, the anonymous, attribute-definition, external-reference and overlay flags, the base point, the external reference path and the description. The main stream must end exactly where the fields do; an external reference states no count of owned objects. The handles after the owner are not read yet.

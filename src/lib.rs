@@ -54,7 +54,7 @@ pub use sections::{
     SectionDirectory, SectionError, SectionPage,
 };
 pub use tables::{
-    read_block_name, read_dimstyle_name, read_layer, read_linetype_name, Layer, TableColor,
-    TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE,
+    read_block_header, read_block_name, read_dimstyle_name, read_layer, read_linetype_name,
+    BlockHeader, Layer, TableColor, TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE,
 };
 pub use version::{detect_version, Error, Unsupported, Version};

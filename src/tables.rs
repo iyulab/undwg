@@ -1,14 +1,21 @@
 //! Table entries: the named objects that entities refer to.
 //!
-//! Only the name of a block header is read so far -- enough to say which block
-//! a block insertion inserts.
+//! The name of any entry can be read; layers and block headers are read in
+//! full. The fields of an entry end exactly where its main stream ends -- that
+//! is checked.
 
 use crate::bits::{BitError, BitReader, TextValue};
-use crate::objects::{open_object, skip_extended_data, ObjectEntry, ObjectError};
+use crate::objects::{open_object, skip_extended_data, Layout, ObjectEntry, ObjectError};
 use crate::version::Version;
 
 /// The type code of a block header.
 pub const TYPE_BLOCK_HEADER: u16 = 49;
+
+/// The type code of a layer.
+pub const TYPE_LAYER: u16 = 51;
+
+/// The type code of a linetype.
+pub const TYPE_LINETYPE: u16 = 57;
 
 /// The type code of a dimension style.
 pub const TYPE_DIMSTYLE: u16 = 69;
@@ -36,12 +43,45 @@ pub fn read_dimstyle_name(
     read_table_name(objects, entry, version, TYPE_DIMSTYLE)
 }
 
+/// Reads the name of the linetype at `entry`; `Ok(None)` when the object is of
+/// another kind.
+pub fn read_linetype_name(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<Option<TextValue>, ObjectError> {
+    read_table_name(objects, entry, version, TYPE_LINETYPE)
+}
+
 fn read_table_name(
     objects: &[u8],
     entry: ObjectEntry,
     version: Version,
     type_code: u16,
 ) -> Result<Option<TextValue>, ObjectError> {
+    Ok(open_entry(objects, entry, version, type_code)?.map(|opened| opened.name))
+}
+
+/// A table entry read up to and including its name.
+struct Opened<'a> {
+    /// Positioned just after the name (in the main stream).
+    r: BitReader<'a>,
+    layout: Layout,
+    /// The string stream, positioned after the name (R2007 and later).
+    strings: Option<BitReader<'a>>,
+    reactors: i32,
+    xdictionary_stored: bool,
+    name: TextValue,
+}
+
+/// Opens the table entry at `entry` and reads the data every object has, then
+/// the name. `Ok(None)` when the object is of another kind.
+fn open_entry<'a>(
+    objects: &'a [u8],
+    entry: ObjectEntry,
+    version: Version,
+    type_code: u16,
+) -> Result<Option<Opened<'a>>, ObjectError> {
     let (frame, mut r, layout) = open_object(objects, entry, version)?;
     if frame.type_code != type_code {
         return Ok(None);
@@ -55,44 +95,104 @@ fn read_table_name(
         });
     }
     skip_extended_data(&mut r)?;
-    r.bit_long()?; // the number of persistent reactors
-    if version >= Version::R2004 {
-        r.bit()?; // no extension dictionary handle is stored
-    }
+    let reactors = r.bit_long()?;
+    let xdictionary_stored = version < Version::R2004 || !r.bit()?;
     if version >= Version::R2013 {
         r.bit()?; // binary data is kept in the data store
     }
-    let name = match layout.strings {
-        Some((from, to)) => {
-            let mut s = r.clone();
-            s.seek(from);
-            let name = s.text(true)?;
-            if s.position() > to {
-                return Err(ObjectError::Unexpected {
-                    what: "table entry string length",
-                });
-            }
-            name
+    let mut strings = layout.strings.map(|(from, _)| {
+        let mut s = r.clone();
+        s.seek(from);
+        s
+    });
+    let name = text_value(&mut r, &mut strings)?;
+    if let (Some(s), Some((_, to))) = (&strings, layout.strings) {
+        if s.position() > to {
+            return Err(ObjectError::Unexpected {
+                what: "table entry string length",
+            });
         }
-        None => r.text(false)?,
-    };
-    Ok(Some(name))
+    }
+    Ok(Some(Opened {
+        r,
+        layout,
+        strings,
+        reactors,
+        xdictionary_stored,
+        name,
+    }))
 }
 
-/// The type code of a layer.
-pub const TYPE_LAYER: u16 = 51;
+impl Opened<'_> {
+    /// The main stream must end exactly where the fields do.
+    fn check_main_end(&self, what: &'static str) -> Result<(), ObjectError> {
+        if self.r.position() == self.layout.main_end {
+            Ok(())
+        } else {
+            Err(ObjectError::Unexpected { what })
+        }
+    }
 
-/// The type code of a linetype.
-pub const TYPE_LINETYPE: u16 = 57;
+    /// The handle stream, positioned after the owner, the reactors and the
+    /// extension dictionary; also returns the owner.
+    fn handles(&self, holder: u64) -> Result<(Handles<'_>, Option<u64>), ObjectError> {
+        let mut h = self.r.clone();
+        h.seek(self.layout.handle_start);
+        let mut handles = Handles { h, holder };
+        let owner = handles.next()?;
+        let reactor_count = usize::try_from(self.reactors)
+            .ok()
+            .filter(|&n| n <= handles.h.remaining() / 8)
+            .ok_or(ObjectError::Unexpected {
+                what: "reactor count",
+            })?;
+        for _ in 0..reactor_count {
+            handles.next()?;
+        }
+        if self.xdictionary_stored {
+            handles.next()?;
+        }
+        Ok((handles, owner))
+    }
+}
 
-/// Reads the name of the linetype at `entry`; `Ok(None)` when the object is of
-/// another kind.
-pub fn read_linetype_name(
-    objects: &[u8],
-    entry: ObjectEntry,
-    version: Version,
-) -> Result<Option<TextValue>, ObjectError> {
-    read_table_name(objects, entry, version, TYPE_LINETYPE)
+/// The handle stream of an object.
+struct Handles<'a> {
+    h: BitReader<'a>,
+    holder: u64,
+}
+
+impl Handles<'_> {
+    fn next(&mut self) -> Result<Option<u64>, ObjectError> {
+        Ok(self.h.handle()?.resolve(self.holder).filter(|&v| v != 0))
+    }
+}
+
+/// Skips what a table entry states about being an external reference: from
+/// R2007 one short (the index of the reference plus one), before that a bit, a
+/// short and a bit (the 64-bit of the DXF flags, the index, and whether the
+/// entry depends on a reference).
+fn skip_xref_fields(r: &mut BitReader<'_>, version: Version) -> Result<(), BitError> {
+    if version >= Version::R2007 {
+        r.bit_short()?;
+    } else {
+        r.bit()?;
+        r.bit_short()?;
+        r.bit()?;
+    }
+    Ok(())
+}
+
+/// Reads a text from the string stream when there is one, otherwise from the
+/// main stream.
+fn text_value(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+) -> Result<TextValue, BitError> {
+    match strings {
+        Some(s) => s.text(true),
+        None => r.text(false),
+    }
 }
 
 /// A colour as a table entry states it (R2000 and later): the way it is given
@@ -151,47 +251,20 @@ pub fn read_layer(
     entry: ObjectEntry,
     version: Version,
 ) -> Result<Option<Layer>, ObjectError> {
-    let (frame, mut r, layout) = open_object(objects, entry, version)?;
-    if frame.type_code != TYPE_LAYER {
+    let Some(mut o) = open_entry(objects, entry, version, TYPE_LAYER)? else {
         return Ok(None);
-    }
-    if version < Version::R2010 {
-        r.raw_long()?; // the size of the main data in bits
-    }
-    if r.handle()?.value != entry.handle {
-        return Err(ObjectError::Unexpected {
-            what: "layer handle",
-        });
-    }
-    skip_extended_data(&mut r)?;
-    let reactors = r.bit_long()?;
-    let xdictionary_stored = version < Version::R2004 || !r.bit()?;
-    if version >= Version::R2013 {
-        r.bit()?; // binary data is kept in the data store
-    }
-    let mut strings = layout.strings.map(|(from, _)| {
-        let mut s = r.clone();
-        s.seek(from);
-        s
-    });
-    let name = text_value(&mut r, &mut strings)?;
-    if version >= Version::R2007 {
-        r.bit_short()?; // the external reference index plus one
-    } else {
-        r.bit()?; // the 64-bit of the DXF flags
-        r.bit_short()?; // the external reference index plus one
-        r.bit()?; // the layer depends on an external reference
-    }
-    let flags = r.bit_short()? as u16;
+    };
+    skip_xref_fields(&mut o.r, version)?;
+    let flags = o.r.bit_short()? as u16;
     let color = if version >= Version::R2004 {
-        r.bit_short()?; // always zero
-        let rgb = r.bit_long()? as u32;
-        let names = r.raw_char()?;
+        o.r.bit_short()?; // always zero
+        let rgb = o.r.bit_long()? as u32;
+        let names = o.r.raw_char()?;
         if names & 1 != 0 {
-            text_value(&mut r, &mut strings)?; // the colour name
+            text_value(&mut o.r, &mut o.strings)?; // the colour name
         }
         if names & 2 != 0 {
-            text_value(&mut r, &mut strings)?; // the colour book name
+            text_value(&mut o.r, &mut o.strings)?; // the colour book name
         }
         TableColor {
             method: (rgb >> 24) as u8,
@@ -200,44 +273,22 @@ pub fn read_layer(
     } else {
         TableColor {
             method: 0xC3,
-            value: r.bit_short()? as u16 as u32,
+            value: o.r.bit_short()? as u16 as u32,
         }
     };
-    if r.position() != layout.main_end {
-        return Err(ObjectError::Unexpected {
-            what: "layer main data length",
-        });
-    }
-    let mut h = r.clone();
-    h.seek(layout.handle_start);
-    let holder = entry.handle;
-    let next = |h: &mut BitReader<'_>| -> Result<Option<u64>, ObjectError> {
-        Ok(h.handle()?.resolve(holder).filter(|&v| v != 0))
-    };
-    let owner = next(&mut h)?;
-    let reactor_count = usize::try_from(reactors)
-        .ok()
-        .filter(|&n| n <= h.remaining() / 8)
-        .ok_or(ObjectError::Unexpected {
-            what: "reactor count",
-        })?;
-    for _ in 0..reactor_count {
-        next(&mut h)?;
-    }
-    if xdictionary_stored {
-        next(&mut h)?;
-    }
-    let xref_block = next(&mut h)?;
-    let plotstyle = next(&mut h)?;
+    o.check_main_end("layer main data length")?;
+    let (mut h, owner) = o.handles(entry.handle)?;
+    let xref_block = h.next()?;
+    let plotstyle = h.next()?;
     let material = if version >= Version::R2007 {
-        next(&mut h)?
+        h.next()?
     } else {
         None
     };
-    let linetype = next(&mut h)?;
+    let linetype = h.next()?;
     Ok(Some(Layer {
         handle: entry.handle,
-        name,
+        name: o.name,
         flags,
         color,
         owner,
@@ -248,16 +299,96 @@ pub fn read_layer(
     }))
 }
 
-/// Reads a text from the string stream when there is one, otherwise from the
-/// main stream.
-fn text_value(
-    r: &mut BitReader<'_>,
-    strings: &mut Option<BitReader<'_>>,
-) -> Result<TextValue, BitError> {
-    match strings {
-        Some(s) => s.text(true),
-        None => r.text(false),
+/// A block header: the table entry that names a block and states where it is
+/// based and whether it comes from another drawing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockHeader {
+    /// The block header's handle.
+    pub handle: u64,
+    /// The block name.
+    pub name: TextValue,
+    /// An anonymous block (the file stores such a block under a name that
+    /// starts with `*` and a letter).
+    pub anonymous: bool,
+    /// The block holds attribute definitions.
+    pub has_attribute_definitions: bool,
+    /// The block is an external reference.
+    pub is_xref: bool,
+    /// The external reference is an overlay.
+    pub xref_overlaid: bool,
+    /// The base point of the block.
+    pub base_point: [f64; 3],
+    /// The path of the external reference (empty for an ordinary block).
+    pub xref_path: TextValue,
+    /// The block description.
+    pub description: TextValue,
+    /// The block control object that owns the entry.
+    pub owner: Option<u64>,
+}
+
+/// Reads the block header at `entry`; `Ok(None)` when the object is of another
+/// kind.
+///
+/// Fields: name, the external reference fields, four flag bits, a loaded bit,
+/// (R2004 and later) the number of owned objects, the base point, the
+/// external reference path, the list of insert counts, the description, the
+/// preview data and (R2007 and later) the insertion units, the explodable bit
+/// and the scaling byte. The main stream must end exactly there. The handles
+/// after the owner (the block entity, the owned objects, the layout) are not
+/// read.
+pub fn read_block_header(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<Option<BlockHeader>, ObjectError> {
+    let Some(mut o) = open_entry(objects, entry, version, TYPE_BLOCK_HEADER)? else {
+        return Ok(None);
+    };
+    skip_xref_fields(&mut o.r, version)?;
+    let anonymous = o.r.bit()?;
+    let has_attribute_definitions = o.r.bit()?;
+    let is_xref = o.r.bit()?;
+    let xref_overlaid = o.r.bit()?;
+    o.r.bit()?; // loaded
+                // An external reference owns no objects, and states no count (real files
+                // end exactly where the fields do only without it).
+    if version >= Version::R2004 && !is_xref && !xref_overlaid {
+        o.r.bit_long()?; // the number of objects the block owns
     }
+    let base_point = [o.r.bit_double()?, o.r.bit_double()?, o.r.bit_double()?];
+    let xref_path = text_value(&mut o.r, &mut o.strings)?;
+    // Insert counts: bytes up to a zero.
+    while o.r.raw_char()? != 0 {}
+    let description = text_value(&mut o.r, &mut o.strings)?;
+    let preview = o.r.bit_long()?;
+    let preview = usize::try_from(preview)
+        .ok()
+        .filter(|&n| n <= o.r.remaining() / 8)
+        .ok_or(ObjectError::Unexpected {
+            what: "block preview size",
+        })?;
+    for _ in 0..preview {
+        o.r.raw_char()?;
+    }
+    if version >= Version::R2007 {
+        o.r.bit_short()?; // insertion units
+        o.r.bit()?; // explodable
+        o.r.raw_char()?; // scaling
+    }
+    o.check_main_end("block header main data length")?;
+    let (_, owner) = o.handles(entry.handle)?;
+    Ok(Some(BlockHeader {
+        handle: entry.handle,
+        name: o.name,
+        anonymous,
+        has_attribute_definitions,
+        is_xref,
+        xref_overlaid,
+        base_point,
+        xref_path,
+        description,
+        owner,
+    }))
 }
 
 #[cfg(test)]
