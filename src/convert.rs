@@ -13,13 +13,17 @@ use uncad_model::color::ACI_PALETTE;
 use uncad_model::model::{
     ArcEntity, AttdefEntity, AttribEntity, AttributeFlags, CircleEntity, Confidence,
     DimensionEntity, DimensionKind as ModelDimensionKind, DimensionPoints, EllipseEntity,
-    EntityCommon, EntityId, EntityLinetype, Face3DEntity, HorizontalJustification, InsertEntity,
+    EntityCommon, EntityId, EntityLinetype, Face3DEntity, HatchBoundaryPath,
+    HatchEdge as ModelHatchEdge, HatchEntity, HatchPatternLine, HatchStyle,
+    HorizontalJustification, ImageEntity, InsertEntity, LeaderAnnotation, LeaderEntity, LeaderPath,
     LineEntity, LwPolylineEntity, MLineEntity, MLineVertex, MTextAttachment, MTextEntity,
     OrdinateAxis, Origin, OverrideValue, Point2D, Point3D, PointEntity, PolylineEntity,
     PolylineVertex, RayEntity, Ref, SolidEntity, SplineEntity, StyleOverride, TextEntity,
     TextOverride, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
 };
-use uncad_model::tables::{BlockRecord, ExternalReference, LayerRecord, Tables};
+use uncad_model::tables::{
+    BlockRecord, ExternalReference, ImageDefinition, LayerRecord, ResolutionUnit, Tables,
+};
 use uncad_model::text::decode_escapes;
 use uncad_model::{CadDatabase, Entity, HeaderVariables as ModelHeader, ReadDiagnostics};
 
@@ -28,8 +32,9 @@ use crate::drawing::{Drawing, DrawingError};
 use crate::entities::{self, read_entity_links, read_entity_with_classes, Geometry};
 use crate::objects::ObjectEntry;
 use crate::tables::{
-    read_appid_name, read_block_control, read_block_header, read_dimstyle_name, read_layer,
-    read_linetype_name, read_mlinestyle_name, read_style_name, BlockHeader, Layer,
+    read_appid_name, read_block_control, read_block_header, read_dimstyle_name,
+    read_image_definition, read_layer, read_linetype_name, read_mlinestyle_name, read_style_name,
+    BlockHeader, Layer,
 };
 use crate::version::Version;
 
@@ -145,6 +150,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let mut styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut dim_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut acad: Option<u64> = None;
+    let mut image_defs: BTreeMap<u64, crate::tables::ImageDefinition> = BTreeMap::new();
     let mut mline_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut headers: Vec<BlockHeader> = Vec::new();
     let mut table_order: Vec<Option<u64>> = Vec::new();
@@ -201,6 +207,17 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             Ok(None) => {}
             Err(_) => {
                 notes.add("multiline style that could not be read");
+                continue;
+            }
+        }
+        match read_image_definition(objects, *e, version, drawing.classes()) {
+            Ok(Some(def)) => {
+                image_defs.insert(e.handle, def);
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                notes.add("image definition that could not be read");
                 continue;
             }
         }
@@ -492,6 +509,28 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         );
     }
 
+    // The image definitions, by handle (the key an image names its picture by).
+    let mut image_definitions: BTreeMap<String, ImageDefinition> = BTreeMap::new();
+    for (handle, def) in &image_defs {
+        let file_path = match characters(&def.file_path) {
+            Some(p) => Some(p),
+            None => {
+                notes.add("image path in a code page that is not read");
+                continue;
+            }
+        };
+        image_definitions.insert(
+            hex(*handle),
+            ImageDefinition {
+                file_path,
+                size_pixels: point2(def.size),
+                pixel_size: point2(def.pixel_size),
+                loaded: Some(def.loaded),
+                resolution_unit: ResolutionUnit::from_code(i32::from(def.resolution_unit)),
+            },
+        );
+    }
+
     let vars = drawing.variables();
     let header = ModelHeader {
         insunits: Some(vars.insertion_units as u16),
@@ -506,6 +545,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         tables: Tables {
             layers: layer_records,
             block_records,
+            image_definitions,
             ..Tables::default()
         },
         header,
@@ -1148,8 +1188,167 @@ fn convert_entity(
                 style_overrides: Some(style_overrides(entity, ctx)),
             })
         }
+        Geometry::Hatch(h) => {
+            // A gradient fill carries colours this reader does not read yet.
+            if h.gradient {
+                notes.add("hatch with a gradient fill entity not converted");
+                return None;
+            }
+            Entity::Hatch(HatchEntity {
+                common,
+                boundary_paths: h.paths.iter().map(hatch_path).collect(),
+                solid_fill: h.solid_fill,
+                gradient: None,
+                pattern_lines: h
+                    .pattern_lines
+                    .iter()
+                    .map(|l| HatchPatternLine {
+                        angle: l.angle,
+                        base_point: point2(l.base_point),
+                        offset: point2(l.offset),
+                        dash_pattern: l.dashes.clone(),
+                    })
+                    .collect(),
+                elevation: h.elevation,
+                extrusion: point(h.extrusion),
+                style: HatchStyle::from_code(i64::from(h.style)),
+            })
+        }
+        Geometry::Image(i) => {
+            // The file states the clip boundary in pixels (the centre of a pixel is
+            // half a pixel in, and rows count down from the top); the model states
+            // it in the drawing, and a rectangle as its four corners.
+            let to_world = |p: [f64; 2]| Point2D {
+                x: i.insertion[0]
+                    + i.u_vector[0] * (p[0] + 0.5)
+                    + i.v_vector[0] * (i.size[1] - (p[1] + 0.5)),
+                y: i.insertion[1]
+                    + i.u_vector[1] * (p[0] + 0.5)
+                    + i.v_vector[1] * (i.size[1] - (p[1] + 0.5)),
+            };
+            let corners: Vec<[f64; 2]> = match (i.clip_type, i.clip_boundary.as_slice()) {
+                (1, [a, b]) => vec![[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]],
+                (_, points) => points.to_vec(),
+            };
+            Entity::Image(ImageEntity {
+                common,
+                insertion_point: point(i.insertion),
+                u_vector: point(i.u_vector),
+                v_vector: point(i.v_vector),
+                size_pixels: point2(i.size),
+                definition: match i.definition {
+                    Some(h) => Ref::Resolved(hex(h)),
+                    None => Ref::Absent,
+                },
+                display_flags: Some(i.display_flags as u16),
+                clipping: Some(i.clipping),
+                brightness: Some(i.brightness),
+                contrast: Some(i.contrast),
+                fade: Some(i.fade),
+                clip_outside: i.clip_mode,
+                boundary: corners.into_iter().map(to_world).collect(),
+            })
+        }
+        Geometry::Leader(l) => Entity::Leader(LeaderEntity {
+            common,
+            vertices: l.points.iter().copied().map(point).collect(),
+            has_arrowhead: Some(l.arrowhead),
+            path_type: Some(if l.path_type == 1 {
+                LeaderPath::Spline
+            } else {
+                LeaderPath::Straight
+            }),
+            annotation: match l.annotation_type {
+                0 => LeaderAnnotation::MText,
+                1 => LeaderAnnotation::Tolerance,
+                2 => LeaderAnnotation::Insert,
+                _ => LeaderAnnotation::Nothing,
+            },
+            annotation_id: match l.annotation {
+                Some(h) => Ref::Resolved(EntityId::new(h)),
+                None => Ref::Absent,
+            },
+            style_name: named(ctx.dim_styles, l.style),
+            style_overrides: Some(style_overrides(entity, ctx)),
+        }),
         _ => return None,
     })
+}
+
+/// A hatch boundary in the model's words.
+fn hatch_path(path: &entities::HatchPath) -> HatchBoundaryPath {
+    if path.flags & 2 != 0 {
+        HatchBoundaryPath::Polyline(
+            path.polyline
+                .iter()
+                .map(|(p, bulge)| PolylineVertex {
+                    point: point2(*p),
+                    bulge: *bulge,
+                    start_width: 0.0,
+                    end_width: 0.0,
+                })
+                .collect(),
+        )
+    } else {
+        HatchBoundaryPath::Edges(
+            path.edges
+                .iter()
+                .map(|e| match e {
+                    entities::HatchEdge::Line { start, end } => ModelHatchEdge::Line {
+                        start: point2(*start),
+                        end: point2(*end),
+                    },
+                    entities::HatchEdge::Arc {
+                        center,
+                        radius,
+                        start_angle,
+                        end_angle,
+                        counter_clockwise,
+                    } => ModelHatchEdge::Arc {
+                        center: point2(*center),
+                        radius: *radius,
+                        start_angle: *start_angle,
+                        end_angle: *end_angle,
+                        is_ccw: *counter_clockwise,
+                    },
+                    entities::HatchEdge::Ellipse {
+                        center,
+                        major_axis,
+                        ratio,
+                        start_angle,
+                        end_angle,
+                        counter_clockwise,
+                    } => ModelHatchEdge::Ellipse {
+                        center: point2(*center),
+                        end: point2(*major_axis),
+                        minor_major_ratio: *ratio,
+                        start_angle: *start_angle,
+                        end_angle: *end_angle,
+                        is_ccw: *counter_clockwise,
+                    },
+                    entities::HatchEdge::Spline {
+                        degree,
+                        rational,
+                        periodic,
+                        knots,
+                        control_points,
+                        fit_points,
+                        tangents,
+                    } => ModelHatchEdge::Spline {
+                        degree: *degree,
+                        rational: *rational,
+                        periodic: *periodic,
+                        knots: knots.clone(),
+                        control_points: control_points.iter().map(|(p, _)| point2(*p)).collect(),
+                        weights: control_points.iter().map(|(_, w)| *w).collect(),
+                        fit_points: fit_points.iter().copied().map(point2).collect(),
+                        start_tangent: tangents.map(|(s, _)| point2(s)),
+                        end_tangent: tangents.map(|(_, e)| point2(e)),
+                    },
+                })
+                .collect(),
+        )
+    }
 }
 
 /// What every entity states, in the model's words.

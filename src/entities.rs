@@ -2414,8 +2414,9 @@ pub struct Image {
     pub contrast: u8,
     /// The fade, 0 to 100.
     pub fade: u8,
-    /// Whether the clip keeps what is inside the boundary (R2010 and later).
-    pub clip_inside: Option<bool>,
+    /// The clip mode bit as stored (R2010 and later), the value of the DXF
+    /// group 290: `true` when the clip keeps what is outside the boundary.
+    pub clip_mode: Option<bool>,
     /// The boundary type: `1` a rectangle (two corners), `2` a polygon.
     pub clip_type: i16,
     /// The clip boundary points, in pixel coordinates.
@@ -2440,7 +2441,7 @@ fn read_image(r: &mut BitReader<'_>, version: Version) -> Result<Image, BitError
     let brightness = r.raw_char()?;
     let contrast = r.raw_char()?;
     let fade = r.raw_char()?;
-    let clip_inside = if version >= Version::R2010 {
+    let clip_mode = if version >= Version::R2010 {
         Some(r.bit()?)
     } else {
         None
@@ -2466,7 +2467,7 @@ fn read_image(r: &mut BitReader<'_>, version: Version) -> Result<Image, BitError
         brightness,
         contrast,
         fade,
-        clip_inside,
+        clip_mode,
         clip_type,
         clip_boundary,
         definition: None,
