@@ -32,13 +32,16 @@ mod version;
 pub use bits::{BitError, BitReader, EndOfData, HandleRef, TextValue};
 pub use classes::{read_classes, ClassDef, ClassError};
 pub use entities::{
-    read_entity, Arc, Attribute, Circle, CommonEntity, Dimension, DimensionKind, Ellipse, Entity,
-    Face3d, Geometry, InfiniteLine, Insert, Line, LwPolyline, LwVertex, Mtext, Point, References,
-    Solid, Spline, Text, Tolerance, TYPE_3DFACE, TYPE_ARC, TYPE_ATTDEF, TYPE_ATTRIB, TYPE_CIRCLE,
-    TYPE_DIMENSION_ALIGNED, TYPE_DIMENSION_ANGULAR_2LINE, TYPE_DIMENSION_ANGULAR_3POINT,
-    TYPE_DIMENSION_DIAMETER, TYPE_DIMENSION_LINEAR, TYPE_DIMENSION_ORDINATE, TYPE_DIMENSION_RADIUS,
-    TYPE_ELLIPSE, TYPE_INSERT, TYPE_LINE, TYPE_LWPOLYLINE, TYPE_MTEXT, TYPE_POINT, TYPE_RAY,
-    TYPE_SOLID, TYPE_SPLINE, TYPE_TEXT, TYPE_TOLERANCE, TYPE_TRACE, TYPE_XLINE,
+    read_entity, read_entity_with_classes, Arc, Attribute, Circle, CommonEntity, Dimension,
+    DimensionKind, Ellipse, Entity, Face3d, Geometry, Hatch, HatchEdge, HatchPath,
+    HatchPatternLine, InfiniteLine, Insert, Line, LwPolyline, LwVertex, Mtext, Point, Polyline2d,
+    Polyline3d, References, Solid, Spline, Text, Tolerance, Vertex2d, Vertex3d, TYPE_3DFACE,
+    TYPE_ARC, TYPE_ATTDEF, TYPE_ATTRIB, TYPE_CIRCLE, TYPE_DIMENSION_ALIGNED,
+    TYPE_DIMENSION_ANGULAR_2LINE, TYPE_DIMENSION_ANGULAR_3POINT, TYPE_DIMENSION_DIAMETER,
+    TYPE_DIMENSION_LINEAR, TYPE_DIMENSION_ORDINATE, TYPE_DIMENSION_RADIUS, TYPE_ELLIPSE,
+    TYPE_INSERT, TYPE_LINE, TYPE_LWPOLYLINE, TYPE_MTEXT, TYPE_POINT, TYPE_POLYLINE_2D,
+    TYPE_POLYLINE_3D, TYPE_RAY, TYPE_SOLID, TYPE_SPLINE, TYPE_TEXT, TYPE_TOLERANCE, TYPE_TRACE,
+    TYPE_VERTEX_2D, TYPE_VERTEX_3D, TYPE_XLINE,
 };
 pub use header::{
     read_header, FileHeader, HeaderError, HeaderR2000, HeaderR2004, SectionLocator,

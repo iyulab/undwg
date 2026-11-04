@@ -14,6 +14,7 @@
 //! which is what makes a wrongly positioned read show up.
 
 use crate::bits::{BitError, BitReader, TextValue};
+use crate::classes::ClassDef;
 use crate::objects::{open_object, skip_extended_data, ObjectEntry, ObjectError};
 use crate::version::Version;
 
@@ -27,6 +28,10 @@ pub const TYPE_LINE: u16 = 19;
 pub const TYPE_POINT: u16 = 27;
 /// The type code of a text.
 pub const TYPE_TEXT: u16 = 1;
+/// A type code no object has: it stands for hatches, which have no fixed type
+/// code of their own but are named by a class of the drawing.
+const TYPE_HATCH: u16 = 0x7001;
+
 /// The type code of a trace.
 pub const TYPE_TRACE: u16 = 32;
 /// The type code of a ray.
@@ -230,6 +235,125 @@ pub struct Text {
     pub vertical: i16,
     /// The handle of the text style.
     pub style: u64,
+}
+
+/// One piece of a hatch boundary.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum HatchEdge {
+    /// A line segment.
+    Line {
+        /// The first end.
+        start: [f64; 2],
+        /// The second end.
+        end: [f64; 2],
+    },
+    /// A circular arc.
+    Arc {
+        /// The centre.
+        center: [f64; 2],
+        /// The radius.
+        radius: f64,
+        /// The start angle, in radians.
+        start_angle: f64,
+        /// The end angle, in radians.
+        end_angle: f64,
+        /// Whether the arc runs counter-clockwise.
+        counter_clockwise: bool,
+    },
+    /// An elliptical arc.
+    Ellipse {
+        /// The centre.
+        center: [f64; 2],
+        /// The end of the major axis, relative to the centre.
+        major_axis: [f64; 2],
+        /// The ratio of the minor to the major axis.
+        ratio: f64,
+        /// The start angle, in radians.
+        start_angle: f64,
+        /// The end angle, in radians.
+        end_angle: f64,
+        /// Whether the arc runs counter-clockwise.
+        counter_clockwise: bool,
+    },
+    /// A spline.
+    Spline {
+        /// The degree.
+        degree: u32,
+        /// Whether the spline has weights.
+        rational: bool,
+        /// Whether the spline is periodic.
+        periodic: bool,
+        /// The knots.
+        knots: Vec<f64>,
+        /// The control points with their weights (`1` when the spline has none).
+        control_points: Vec<([f64; 2], f64)>,
+        /// The fit points (R2010 and later).
+        fit_points: Vec<[f64; 2]>,
+        /// The tangents at the start and the end (R2010 and later).
+        tangents: Option<([f64; 2], [f64; 2])>,
+    },
+}
+
+/// A boundary of a hatch: a polyline, or a chain of edges.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HatchPath {
+    /// The path flags: external `1`, polyline `2`, derived `4`, textbox `8`, outermost `16`.
+    pub flags: i32,
+    /// The pieces of an edge path (empty for a polyline path).
+    pub edges: Vec<HatchEdge>,
+    /// The points of a polyline path with the bulge of the segment that leaves each (`0` when none).
+    pub polyline: Vec<([f64; 2], f64)>,
+    /// Whether a polyline path is closed.
+    pub closed: bool,
+    /// The objects the boundary was made from (an associative hatch follows them).
+    pub boundary_objects: Vec<u64>,
+}
+
+/// One line of a hatch pattern.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HatchPatternLine {
+    /// The angle, in radians.
+    pub angle: f64,
+    /// A point the line passes through.
+    pub base_point: [f64; 2],
+    /// The offset to the next parallel line.
+    pub offset: [f64; 2],
+    /// The lengths of the dashes and the gaps (a gap is negative).
+    pub dashes: Vec<f64>,
+}
+
+/// A hatch: an area filled with a pattern or a colour.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hatch {
+    /// The z of the hatch plane.
+    pub elevation: f64,
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// The name of the pattern.
+    pub name: TextValue,
+    /// Whether the area is filled solid.
+    pub solid_fill: bool,
+    /// Whether the hatch follows the objects of its boundary.
+    pub associative: bool,
+    /// Whether the fill is a gradient (R2004 and later).
+    pub gradient: bool,
+    /// The boundaries.
+    pub paths: Vec<HatchPath>,
+    /// The style: odd parity `0`, outermost `1`, whole area `2`.
+    pub style: i16,
+    /// The pattern type: user defined `0`, predefined `1`, custom `2`.
+    pub pattern_type: i16,
+    /// The pattern angle, in radians (a pattern fill).
+    pub angle: f64,
+    /// The pattern scale or spacing (a pattern fill).
+    pub scale: f64,
+    /// Whether the pattern is crossed with itself (a pattern fill).
+    pub double: bool,
+    /// The lines of the pattern (a pattern fill).
+    pub pattern_lines: Vec<HatchPatternLine>,
+    /// The seed points.
+    pub seed_points: Vec<[f64; 2]>,
 }
 
 /// A ray (a half line) or an infinite line: a point and the direction it runs in.
@@ -605,6 +729,8 @@ pub enum Geometry {
     Dimension(Dimension),
     /// A spline.
     Spline(Spline),
+    /// A hatch.
+    Hatch(Hatch),
     /// A trace: a filled area like a solid.
     Trace(Solid),
     /// A ray.
@@ -984,6 +1110,193 @@ fn skip_color(r: &mut BitReader<'_>, strings: &mut Option<BitReader<'_>>) -> Res
         text_value(r, strings)?;
     }
     Ok(())
+}
+
+/// Reads a hatch. The handles of the boundary objects are in the handle
+/// stream; the counts of them are returned for it, path by path.
+fn read_hatch(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+) -> Result<(Hatch, Vec<usize>), BitError> {
+    let mut gradient = false;
+    if version >= Version::R2004 {
+        gradient = r.bit_long()? != 0;
+        r.bit_long()?; // reserved
+        r.bit_double()?; // gradient angle
+        r.bit_double()?; // gradient shift
+        r.bit_long()?; // single colour gradient
+        r.bit_double()?; // gradient tint
+        let colors = bounded_count(r, "gradient colour count")?;
+        for _ in 0..colors {
+            r.bit_double()?;
+            r.bit_short()?;
+            r.bit_long()?;
+            r.raw_char()?;
+        }
+        text_value(r, strings)?; // the gradient name
+    }
+    let elevation = r.bit_double()?;
+    let extrusion = r.point_3bd()?;
+    let name = text_value(r, strings)?;
+    let solid_fill = r.bit()?;
+    let associative = r.bit()?;
+    let path_count = bounded_count(r, "hatch path count")?;
+    let mut paths = Vec::with_capacity(path_count);
+    let mut boundary_counts = Vec::with_capacity(path_count);
+    let mut any_derived = false;
+    for _ in 0..path_count {
+        let flags = r.bit_long()?;
+        any_derived |= flags & 4 != 0;
+        let mut path = HatchPath {
+            flags,
+            edges: Vec::new(),
+            polyline: Vec::new(),
+            closed: false,
+            boundary_objects: Vec::new(),
+        };
+        if flags & 2 == 0 {
+            let segments = bounded_count(r, "hatch edge count")?;
+            for _ in 0..segments {
+                let kind = r.raw_char()?;
+                path.edges.push(match kind {
+                    1 => HatchEdge::Line {
+                        start: [r.raw_double()?, r.raw_double()?],
+                        end: [r.raw_double()?, r.raw_double()?],
+                    },
+                    2 => HatchEdge::Arc {
+                        center: [r.raw_double()?, r.raw_double()?],
+                        radius: r.bit_double()?,
+                        start_angle: r.bit_double()?,
+                        end_angle: r.bit_double()?,
+                        counter_clockwise: r.bit()?,
+                    },
+                    3 => HatchEdge::Ellipse {
+                        center: [r.raw_double()?, r.raw_double()?],
+                        major_axis: [r.raw_double()?, r.raw_double()?],
+                        ratio: r.bit_double()?,
+                        start_angle: r.bit_double()?,
+                        end_angle: r.bit_double()?,
+                        counter_clockwise: r.bit()?,
+                    },
+                    4 => {
+                        let degree =
+                            u32::try_from(r.bit_long()?).map_err(|_| BitError::TooLong {
+                                form: "hatch spline degree",
+                            })?;
+                        let rational = r.bit()?;
+                        let periodic = r.bit()?;
+                        let knot_count = bounded_count(r, "hatch spline knot count")?;
+                        let control_count = bounded_count(r, "hatch spline control point count")?;
+                        let mut knots = Vec::with_capacity(knot_count);
+                        for _ in 0..knot_count {
+                            knots.push(r.bit_double()?);
+                        }
+                        let mut control_points = Vec::with_capacity(control_count);
+                        for _ in 0..control_count {
+                            let point = [r.raw_double()?, r.raw_double()?];
+                            let weight = if rational { r.bit_double()? } else { 1.0 };
+                            control_points.push((point, weight));
+                        }
+                        let mut fit_points = Vec::new();
+                        let mut tangents = None;
+                        if version >= Version::R2010 {
+                            let fit_count = bounded_count(r, "hatch spline fit point count")?;
+                            for _ in 0..fit_count {
+                                fit_points.push([r.raw_double()?, r.raw_double()?]);
+                            }
+                            tangents = Some((
+                                [r.raw_double()?, r.raw_double()?],
+                                [r.raw_double()?, r.raw_double()?],
+                            ));
+                        }
+                        HatchEdge::Spline {
+                            degree,
+                            rational,
+                            periodic,
+                            knots,
+                            control_points,
+                            fit_points,
+                            tangents,
+                        }
+                    }
+                    _ => {
+                        return Err(BitError::Unsupported {
+                            form: "a hatch edge of an unknown kind",
+                        })
+                    }
+                });
+            }
+        } else {
+            let bulges = r.bit()?;
+            path.closed = r.bit()?;
+            let count = bounded_count(r, "hatch polyline point count")?;
+            for _ in 0..count {
+                let point = [r.raw_double()?, r.raw_double()?];
+                let bulge = if bulges { r.bit_double()? } else { 0.0 };
+                path.polyline.push((point, bulge));
+            }
+        }
+        boundary_counts.push(bounded_count(r, "hatch boundary object count")?);
+        paths.push(path);
+    }
+    let style = r.bit_short()?;
+    let pattern_type = r.bit_short()?;
+    let (mut angle, mut scale, mut double) = (0.0, 0.0, false);
+    let mut pattern_lines = Vec::new();
+    if !solid_fill {
+        angle = r.bit_double()?;
+        scale = r.bit_double()?;
+        double = r.bit()?;
+        let lines = usize::try_from(r.bit_short()?).map_err(|_| BitError::TooLong {
+            form: "hatch pattern line count",
+        })?;
+        for _ in 0..lines {
+            let line_angle = r.bit_double()?;
+            let base_point = [r.bit_double()?, r.bit_double()?];
+            let offset = [r.bit_double()?, r.bit_double()?];
+            let dash_count = usize::try_from(r.bit_short()?).map_err(|_| BitError::TooLong {
+                form: "hatch dash count",
+            })?;
+            let mut dashes = Vec::with_capacity(dash_count.min(r.remaining()));
+            for _ in 0..dash_count {
+                dashes.push(r.bit_double()?);
+            }
+            pattern_lines.push(HatchPatternLine {
+                angle: line_angle,
+                base_point,
+                offset,
+                dashes,
+            });
+        }
+    }
+    if any_derived {
+        r.bit_double()?; // the pixel size
+    }
+    let seed_count = bounded_count(r, "hatch seed point count")?;
+    let mut seed_points = Vec::with_capacity(seed_count);
+    for _ in 0..seed_count {
+        seed_points.push([r.raw_double()?, r.raw_double()?]);
+    }
+    Ok((
+        Hatch {
+            elevation,
+            extrusion,
+            name,
+            solid_fill,
+            associative,
+            gradient,
+            paths,
+            style,
+            pattern_type,
+            angle,
+            scale,
+            double,
+            pattern_lines,
+            seed_points,
+        },
+        boundary_counts,
+    ))
 }
 
 /// Reads a geometric tolerance. R13 and R14 state three more values first.
@@ -1546,7 +1859,29 @@ pub fn read_entity(
     entry: ObjectEntry,
     version: Version,
 ) -> Result<Option<Entity>, ObjectError> {
-    let (frame, mut r, layout) = open_object(objects, entry, version)?;
+    read_entity_with_classes(objects, entry, version, &[])
+}
+
+/// Like [`read_entity`], and also reads the kinds that have no fixed type
+/// code but are named by a class of the drawing (hatches): `classes` is the
+/// class table of the file.
+pub fn read_entity_with_classes(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+    classes: &[ClassDef],
+) -> Result<Option<Entity>, ObjectError> {
+    let (mut frame, mut r, layout) = open_object(objects, entry, version)?;
+    // A hatch has the fixed type code 78 in R2000 and is an object of a class
+    // (named by its DXF name) in later versions.
+    if frame.type_code == 78
+        || (frame.type_code >= 500
+            && classes.iter().any(|c| {
+                i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "HATCH"
+            }))
+    {
+        frame.type_code = TYPE_HATCH;
+    }
     if !matches!(
         frame.type_code,
         TYPE_ARC
@@ -1557,6 +1892,7 @@ pub fn read_entity(
             | TYPE_INSERT
             | TYPE_TEXT
             | TYPE_MTEXT
+            | TYPE_HATCH
             | TYPE_TRACE
             | TYPE_RAY
             | TYPE_XLINE
@@ -1583,6 +1919,7 @@ pub fn read_entity(
         });
     }
     let mut owned = 0;
+    let mut boundary_counts: Vec<usize> = Vec::new();
     let mut registered_application = false;
     // From R2007 the text values of an entity are in its string stream.
     let mut strings = layout.strings.map(|(from, _)| {
@@ -1614,6 +1951,11 @@ pub fn read_entity(
             Geometry::Dimension(read_dimension(&mut r, &mut strings, version, kind)?)
         }
         TYPE_SPLINE => Geometry::Spline(read_spline(&mut r, version)?),
+        TYPE_HATCH => {
+            let (hatch, counts) = read_hatch(&mut r, &mut strings, version)?;
+            boundary_counts = counts;
+            Geometry::Hatch(hatch)
+        }
         TYPE_TRACE => Geometry::Trace(read_solid(&mut r)?),
         TYPE_RAY | TYPE_XLINE => {
             let line = InfiniteLine {
@@ -1704,6 +2046,15 @@ pub fn read_entity(
             }
         }
         *sequence_end = h.handle()?.resolve(common.handle).filter(|&v| v != 0);
+    }
+    if let Geometry::Hatch(hatch) = &mut geometry {
+        for (path, count) in hatch.paths.iter_mut().zip(&boundary_counts) {
+            for _ in 0..*count {
+                if let Some(v) = h.handle()?.resolve(common.handle).filter(|&v| v != 0) {
+                    path.boundary_objects.push(v);
+                }
+            }
+        }
     }
     if let Geometry::Tolerance(t) = &mut geometry {
         t.style = h.handle()?.resolve(common.handle).filter(|&v| v != 0);

@@ -12,8 +12,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use undwg::{
-    read_block_name, read_classes, read_dimstyle_name, read_directory, read_entity, read_header,
-    read_object_frame, read_object_map, read_section, FileHeader, Geometry, TextValue, Version,
+    read_block_name, read_classes, read_dimstyle_name, read_directory, read_entity,
+    read_entity_with_classes, read_header, read_object_frame, read_object_map, read_section,
+    FileHeader, Geometry, HatchEdge, TextValue, Version,
 };
 
 /// A text as the dump writes it: `U:` and the hex of its UTF-8 for Unicode
@@ -113,9 +114,10 @@ fn every_real_line_circle_and_arc_reads() {
         mut polylines_3d,
         mut vertices,
         mut others,
+        mut hatches,
         mut failed,
     ) = (
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize,
     );
     let mut named_blocks = 0usize;
     let mut references_checked = 0usize;
@@ -142,7 +144,26 @@ fn every_real_line_circle_and_arc_reads() {
             }
             _ => continue,
         };
-        let _ = (read_classes, 0);
+        let classes_section: Option<Vec<u8>> = match read_header(&bytes) {
+            Ok(FileHeader::R2004(_, header)) => {
+                let dir = read_directory(&bytes, &header).expect("directory");
+                read_section(&bytes, &dir, "AcDb:Classes").ok().flatten()
+            }
+            Ok(FileHeader::R2000(header)) => {
+                header.section(&bytes, 1).ok().flatten().map(<[u8]>::to_vec)
+            }
+            _ => None,
+        };
+        let classes = classes_section
+            .map(|section| read_classes(&section, version).expect("classes"))
+            .unwrap_or_default();
+        let is_hatch = |code: u16| {
+            code == 78
+                || (code >= 500
+                    && classes
+                        .iter()
+                        .any(|c| i32::from(c.number) == i32::from(code) && c.dxf_name == "HATCH"))
+        };
         let entries = read_object_map(&handles)
             .unwrap_or_else(|e| panic!("{}: object map: {e}", path.display()));
         files_read += 1;
@@ -216,11 +237,12 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 40 | 41 | 44 | 46 | 77)
+            if !is_hatch(frame.type_code)
+                && !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 40 | 41 | 44 | 46 | 77)
             {
                 continue;
             }
-            let entity = match read_entity(&objects, *entry, version) {
+            let entity = match read_entity_with_classes(&objects, *entry, version, &classes) {
                 Ok(Some(e)) => e,
                 Ok(None) => panic!(
                     "{}: type {} gave no entity",
@@ -503,6 +525,106 @@ fn every_real_line_circle_and_arc_reads() {
                         flat
                     )
                 }
+                Geometry::Hatch(h) => {
+                    hatches += 1;
+                    // A token string: the paths, edge by edge, then the fill and the pattern.
+                    let mut t: Vec<String> = Vec::new();
+                    for path in &h.paths {
+                        if path.flags & 2 != 0 {
+                            t.push(format!(
+                                "P{} {}",
+                                i32::from(path.closed),
+                                path.polyline.len()
+                            ));
+                            for (p, b) in &path.polyline {
+                                t.push(format!("{:?} {:?} {:?}", p[0], p[1], b));
+                            }
+                        } else {
+                            t.push(format!("E{}", path.edges.len()));
+                            for e in &path.edges {
+                                t.push(match e {
+                                    HatchEdge::Line { start, end } => {
+                                        format!(
+                                            "L {:?} {:?} {:?} {:?}",
+                                            start[0], start[1], end[0], end[1]
+                                        )
+                                    }
+                                    HatchEdge::Arc {
+                                        center,
+                                        radius,
+                                        start_angle,
+                                        end_angle,
+                                        counter_clockwise,
+                                    } => format!(
+                                        "A {:?} {:?} {:?} {:?} {:?} {}",
+                                        center[0],
+                                        center[1],
+                                        radius,
+                                        start_angle,
+                                        end_angle,
+                                        i32::from(*counter_clockwise)
+                                    ),
+                                    HatchEdge::Ellipse {
+                                        center,
+                                        major_axis,
+                                        ratio,
+                                        start_angle,
+                                        end_angle,
+                                        counter_clockwise,
+                                    } => format!(
+                                        "N {:?} {:?} {:?} {:?} {:?} {:?} {:?} {}",
+                                        center[0],
+                                        center[1],
+                                        major_axis[0],
+                                        major_axis[1],
+                                        ratio,
+                                        start_angle,
+                                        end_angle,
+                                        i32::from(*counter_clockwise)
+                                    ),
+                                    HatchEdge::Spline {
+                                        degree,
+                                        rational,
+                                        periodic,
+                                        knots,
+                                        control_points,
+                                        ..
+                                    } => format!(
+                                        "S {degree} {} {} {:?} {:?}",
+                                        i32::from(*rational),
+                                        i32::from(*periodic),
+                                        knots,
+                                        control_points
+                                            .iter()
+                                            .map(|(p, w)| (p[0], p[1], *w))
+                                            .collect::<Vec<_>>()
+                                    ),
+                                    _ => "?".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    let lines: Vec<String> = h
+                        .pattern_lines
+                        .iter()
+                        .map(|l| {
+                            format!(
+                                "{:?} {:?} {:?} {:?}",
+                                l.angle, l.base_point, l.offset, l.dashes
+                            )
+                        })
+                        .collect();
+                    format!(
+                        "HATCH\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+                        h.elevation,
+                        i32::from(h.solid_fill),
+                        h.style,
+                        h.extrusion,
+                        t.join(" | "),
+                        lines.join(" | "),
+                        text_hex(&h.name)
+                    )
+                }
                 Geometry::Trace(d) => {
                     others += 1;
                     assert!(
@@ -684,7 +806,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions, {splines} splines, {polylines_2d} 2D and {polylines_3d} 3D polylines with {vertices} vertices, {others} traces, rays, infinite lines and tolerances read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions, {splines} splines, {polylines_2d} 2D and {polylines_3d} 3D polylines with {vertices} vertices, {others} traces, rays, infinite lines and tolerances, {hatches} hatches read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");
