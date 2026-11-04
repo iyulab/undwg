@@ -175,9 +175,11 @@ fn every_real_object_has_an_intact_frame_and_the_counts_match_the_class_table() 
         eprintln!("unreadable frames: {count} in {file}");
     }
     assert!(files_read > 0, "the corpus holds no R2004-family file");
-    // Unreadable frames are the exception: under one in a hundred overall.
+    // With positions counted per block, every entry names a position inside the
+    // object data and every frame holds.
+    assert_eq!(outside, 0, "map entries outside the object data");
     assert!(
-        unreadable.len() * 100 < objects_read,
+        unreadable.is_empty(),
         "{} of {objects_read} object frames are unreadable",
         unreadable.len()
     );
