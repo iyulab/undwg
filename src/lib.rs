@@ -27,6 +27,7 @@ mod lz;
 mod objects;
 mod sections;
 mod tables;
+mod variables;
 mod version;
 
 pub use bits::{BitError, BitReader, EndOfData, HandleRef, TextValue};
@@ -58,5 +59,9 @@ pub use tables::{
     read_layer, read_linetype_name, read_mlinestyle_name, BlockHeader, DimStyle, ImageDefinition,
     Layer, TableColor, TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE,
     TYPE_MLINESTYLE,
+};
+pub use variables::{
+    read_header_variables, ControlHandles, DimensionVariables, ExtendedVariables, HeaderColor,
+    HeaderVariables, SpaceVariables, Timestamp, VariablesError,
 };
 pub use version::{detect_version, Error, Unsupported, Version};

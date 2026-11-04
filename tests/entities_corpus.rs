@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 
 use undwg::{
     read_block_header, read_block_name, read_classes, read_dim_style, read_dimstyle_name,
-    read_directory, read_entity, read_entity_with_classes, read_header, read_image_definition,
-    read_layer, read_linetype_name, read_mlinestyle_name, read_object_frame, read_object_map,
-    read_section, FileHeader, Geometry, HatchEdge, TextValue, Version,
+    read_directory, read_entity, read_entity_with_classes, read_header, read_header_variables,
+    read_image_definition, read_layer, read_linetype_name, read_mlinestyle_name, read_object_frame,
+    read_object_map, read_section, FileHeader, Geometry, HatchEdge, TextValue, Version,
+    TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE, TYPE_MLINESTYLE,
 };
 
 /// A text as the dump writes it: `U:` and the hex of its UTF-8 for Unicode
@@ -186,6 +187,83 @@ fn every_real_line_circle_and_arc_reads() {
                     .map(|f| (e.handle, f.type_code))
             })
             .collect();
+        // The header variables: the handles they name must be objects of the
+        // kinds the format says, and (with a dump) the values the other reader
+        // also exports are written for comparison.
+        let variables_section: Vec<u8> = match read_header(&bytes) {
+            Ok(FileHeader::R2004(_, header)) => {
+                let dir = read_directory(&bytes, &header).expect("directory");
+                read_section(&bytes, &dir, "AcDb:Header")
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                    .unwrap_or_else(|| panic!("{}: no header section", path.display()))
+            }
+            Ok(FileHeader::R2000(header)) => header
+                .section(&bytes, 0)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                .unwrap_or_else(|| panic!("{}: no header locator", path.display()))
+                .to_vec(),
+            _ => continue,
+        };
+        let vars = read_header_variables(&variables_section, version)
+            .unwrap_or_else(|e| panic!("{} ({version}): header variables: {e}", path.display()));
+        // Object type codes of the tables and their control objects.
+        let named: [(&str, u64, u16); 14] = [
+            (
+                "model space block",
+                vars.model_space_block,
+                TYPE_BLOCK_HEADER,
+            ),
+            (
+                "paper space block",
+                vars.paper_space_block,
+                TYPE_BLOCK_HEADER,
+            ),
+            ("current layer", vars.current_layer, TYPE_LAYER),
+            ("ByLayer line type", vars.line_type_by_layer, TYPE_LINETYPE),
+            ("ByBlock line type", vars.line_type_by_block, TYPE_LINETYPE),
+            (
+                "Continuous line type",
+                vars.line_type_continuous,
+                TYPE_LINETYPE,
+            ),
+            (
+                "current dimension style",
+                vars.current_dim_style,
+                TYPE_DIMSTYLE,
+            ),
+            (
+                "current multiline style",
+                vars.current_mline_style,
+                TYPE_MLINESTYLE,
+            ),
+            ("block control", vars.controls.block, 48),
+            ("layer control", vars.controls.layer, 50),
+            ("text style control", vars.controls.style, 52),
+            ("line type control", vars.controls.linetype, 56),
+            ("dimension style control", vars.controls.dimstyle, 68),
+            ("current text style", vars.current_text_style, 53),
+        ];
+        for (what, handle, code) in named {
+            assert_eq!(
+                types.get(&handle),
+                Some(&code),
+                "{} ({version}): header variable {what} names {handle:#x}",
+                path.display()
+            );
+        }
+        if let Some(out) = dump.as_mut() {
+            writeln!(
+                out,
+                "{}	0	HEADER	{}	{}	{:?}	{}	{}",
+                path.display(),
+                vars.insertion_units,
+                vars.point_mode,
+                vars.point_size,
+                text_hex(&vars.fingerprint_guid),
+                text_hex(&vars.version_guid)
+            )
+            .unwrap();
+        }
         // The name of every block header, to name what an insertion inserts.
         let block_names: std::collections::BTreeMap<u64, TextValue> = entries
             .iter()
