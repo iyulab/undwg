@@ -805,6 +805,9 @@ pub enum Geometry {
     Viewport(Viewport),
     /// A raster image.
     Image(Image),
+    /// An entity of a kind this reader does not read, with the name the file
+    /// gives the kind (its DXF name).
+    Unread(String),
     /// A wipeout: a masked area, stated the way a raster image states its frame
     /// and clip boundary (its definition is none).
     Wipeout(Image),
@@ -1934,6 +1937,33 @@ pub fn read_entity(
     read_entity_with_classes(objects, entry, version, &[])
 }
 
+/// The name of an entity kind this reader does not read, from its type code or
+/// the class that names it; `None` for an object that is not an entity (and for
+/// the entities a block or a polyline owns: the block and its end, the
+/// sequence end, the vertices of a mesh).
+fn unread_entity_name(type_code: u16, classes: &[ClassDef]) -> Option<String> {
+    let fixed = match type_code {
+        8 => "MINSERT",
+        29 => "POLYLINE_PFACE",
+        30 => "POLYLINE_MESH",
+        33 => "SHAPE",
+        37 => "REGION",
+        38 => "3DSOLID",
+        39 => "BODY",
+        _ => "",
+    };
+    if !fixed.is_empty() {
+        return Some(fixed.to_string());
+    }
+    if type_code >= 500 {
+        return classes
+            .iter()
+            .find(|c| i32::from(c.number) == i32::from(type_code) && c.item_class_id == 0x1F2)
+            .map(|c| c.dxf_name.clone());
+    }
+    None
+}
+
 /// The entities before and after the entity at `entry` in its block.
 ///
 /// R2000 keeps a block's entities as a chain: the block header names the first
@@ -2042,7 +2072,25 @@ pub fn read_entity_with_classes(
                 | TYPE_LEADER
                 | TYPE_MLINE
     ) {
-        return Ok(None);
+        // An entity of a kind this reader does not read is still an entity:
+        // its common data and references are read, and the kind is named.
+        let Some(name) = unread_entity_name(frame.type_code, classes) else {
+            return Ok(None);
+        };
+        let (common, flags) = read_common(&mut r, version)?;
+        if common.handle != entry.handle {
+            return Err(ObjectError::Unexpected {
+                what: "entity handle",
+            });
+        }
+        let mut h = r.clone();
+        h.seek(layout.handle_start);
+        let references = read_references(&mut h, &common, flags)?;
+        return Ok(Some(Entity {
+            common,
+            geometry: Geometry::Unread(name),
+            references,
+        }));
     }
     let (common, flags) = read_common(&mut r, version)?;
     if common.handle != entry.handle {

@@ -472,12 +472,19 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         };
         let Some(owner) = owner else {
             // A vertex or an attribute belongs to the entity that owns it, not to a
-            // block; it is read with that entity.
+            // block; it is read with that entity. A kind this reader does not read
+            // and no block holds is an object the class table calls an entity (or one
+            // an entity owns), not an entity of the drawing.
             if !matches!(
                 entity.geometry,
-                Geometry::Vertex2d(_) | Geometry::Vertex3d(_) | Geometry::Attrib(_)
+                Geometry::Vertex2d(_)
+                    | Geometry::Vertex3d(_)
+                    | Geometry::Attrib(_)
+                    | Geometry::Unread(_)
             ) {
-                notes.add("entity whose block is not known");
+                let kind = format!("{:?}", entity.geometry);
+                let kind = kind.split(['(', ' ', '{']).next().unwrap_or("").to_string();
+                notes.add(format!("{kind} entity whose block is not known"));
             }
             continue;
         };
@@ -1435,6 +1442,12 @@ fn convert_entity(
             style_name: named(ctx.dim_styles, l.style),
             style_overrides: Some(style_overrides(entity, ctx)),
         }),
+        // An entity of a kind this reader does not read keeps its common data and
+        // the name the file gives it, as the model asks.
+        Geometry::Unread(name) => Entity::Unknown {
+            common,
+            type_name: name.clone(),
+        },
         _ => return None,
     })
 }
