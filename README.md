@@ -22,7 +22,9 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | Layer | State |
 |---|---|
 | Version detection (R2000 to R2018) | done |
-| File header, section map, decompression, checksums | in progress |
+| File header (R2000, R2004, R2010, R2013, R2018) with checksums | done |
+| File header of R2007 | planned |
+| Section map, decompression | in progress |
 | Object stream, handle map, classes | planned |
 | Entities, tables, blocks, header variables | planned |
 
