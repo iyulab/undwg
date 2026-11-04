@@ -121,7 +121,7 @@ fn every_real_line_circle_and_arc_reads() {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize,
     );
     let mut named_blocks = 0usize;
-    let mut unsupported_images = 0usize;
+    let mut unsupported_leaders = 0usize;
     let mut references_checked = 0usize;
     for path in &files {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -373,7 +373,7 @@ fn every_real_line_circle_and_arc_reads() {
             };
             if !is_hatch(frame.type_code)
                 && !is_class(frame.type_code, "IMAGE")
-                && !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 34 | 40 | 41 | 44 | 46 | 77)
+                && !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 34 | 40 | 41 | 44 | 45 | 46 | 77)
             {
                 continue;
             }
@@ -384,8 +384,8 @@ fn every_real_line_circle_and_arc_reads() {
                     path.display(),
                     frame.type_code
                 ),
-                Err(e) if e.to_string().contains("a raster image of R2010 and later") => {
-                    unsupported_images += 1;
+                Err(e) if e.to_string().contains("a leader of R2010 and later") => {
+                    unsupported_leaders += 1;
                     continue;
                 }
                 Err(e) => {
@@ -943,6 +943,40 @@ fn every_real_line_circle_and_arc_reads() {
                     let flat: Vec<f64> = f.corners.iter().flatten().copied().collect();
                     format!("3DFACE\t{:?}\t{:?}", flat, f.invisible_edges)
                 }
+                Geometry::Leader(l) => {
+                    assert!(
+                        l.points.iter().all(|p| finite(p))
+                            && finite(&l.origin)
+                            && finite(&l.extrusion)
+                            && l.box_height.is_finite()
+                            && l.box_width.is_finite(),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    if let Some(style) = l.style {
+                        assert!(
+                            style_names.contains_key(&style),
+                            "{}: {:#x}: the leader style has no name",
+                            path.display(),
+                            entry.handle
+                        );
+                    }
+                    let style = l
+                        .style
+                        .and_then(|h| style_names.get(&h))
+                        .map(text_hex)
+                        .unwrap_or_default();
+                    format!(
+                        "LEADER\t{:?}\t{}\t{}\t{}\t{}\t{:?}",
+                        l.points,
+                        u8::from(l.arrowhead),
+                        l.path_type,
+                        l.annotation_type,
+                        l.annotation.map_or(-1, |h| h as i64),
+                        style
+                    )
+                }
                 Geometry::Image(i) => {
                     assert!(
                         finite(&i.insertion)
@@ -1070,7 +1104,7 @@ fn every_real_line_circle_and_arc_reads() {
     eprintln!(
         "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions, {splines} splines, {polylines_2d} 2D and {polylines_3d} 3D polylines with {vertices} vertices, {others} traces, rays, infinite lines and tolerances, {hatches} hatches read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
-    eprintln!("{unsupported_images} raster images of R2010 and later are not read yet");
+    eprintln!("{unsupported_leaders} leaders of R2010 and later are not read yet");
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");
 }

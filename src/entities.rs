@@ -83,6 +83,8 @@ pub const TYPE_SOLID: u16 = 31;
 pub const TYPE_LWPOLYLINE: u16 = 77;
 /// The type code of a viewport.
 pub const TYPE_VIEWPORT: u16 = 34;
+/// The type code of a leader.
+pub const TYPE_LEADER: u16 = 45;
 
 /// What every entity states about itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -771,6 +773,8 @@ pub enum Geometry {
     Viewport(Viewport),
     /// A raster image.
     Image(Image),
+    /// A leader.
+    Leader(Leader),
 }
 
 /// An entity: its common data and its geometry.
@@ -1935,6 +1939,7 @@ pub fn read_entity_with_classes(
                 | TYPE_3DFACE
                 | TYPE_VIEWPORT
                 | TYPE_IMAGE
+                | TYPE_LEADER
     ) {
         return Ok(None);
     }
@@ -2022,6 +2027,7 @@ pub fn read_entity_with_classes(
         TYPE_SOLID => Geometry::Solid(read_solid(&mut r)?),
         TYPE_3DFACE => Geometry::Face3d(read_face3d(&mut r)?),
         TYPE_IMAGE => Geometry::Image(read_image(&mut r, version)?),
+        TYPE_LEADER => Geometry::Leader(read_leader(&mut r, version)?),
         TYPE_VIEWPORT => {
             let (viewport, frozen) = read_viewport(&mut r, &mut strings, version)?;
             frozen_layer_count = frozen;
@@ -2113,6 +2119,10 @@ pub fn read_entity_with_classes(
             next()?; // the shade plot object
             next()?; // the sun
         }
+    }
+    if let Geometry::Leader(l) = &mut geometry {
+        l.annotation = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
+        l.style = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
     }
     if let Geometry::Image(i) = &mut geometry {
         i.definition = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
@@ -2359,11 +2369,6 @@ fn read_image(r: &mut BitReader<'_>, version: Version) -> Result<Image, BitError
     // From R2010 about 150 bytes precede the class version in the files seen (the
     // clip polygon appears in them); what they are is not understood yet, and
     // reading on from there would give wrong numbers.
-    if version >= Version::R2010 {
-        return Err(BitError::Unsupported {
-            form: "a raster image of R2010 and later",
-        });
-    }
     let class_version = r.bit_long()?;
     let insertion = r.point_3bd()?;
     let u_vector = r.point_3bd()?;
@@ -2405,5 +2410,87 @@ fn read_image(r: &mut BitReader<'_>, version: Version) -> Result<Image, BitError
         clip_boundary,
         definition: None,
         reactor: None,
+    })
+}
+
+/// A leader: a line (or a spline) from an annotation to what it points at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Leader {
+    /// What the leader is attached to: `0` a multiline text, `1` a tolerance,
+    /// `2` a block insertion, `3` nothing.
+    pub annotation_type: i16,
+    /// `0` straight segments, `1` a spline.
+    pub path_type: i16,
+    /// The vertices of the path.
+    pub points: Vec<[f64; 3]>,
+    /// The origin of the leader plane.
+    pub origin: [f64; 3],
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// The direction of the x axis of the leader plane.
+    pub x_direction: [f64; 3],
+    /// The offset from the end of the leader to the block insertion point.
+    pub block_offset: [f64; 3],
+    /// The end point projection (the offset of the annotation with the
+    /// extrusion direction taken into account).
+    pub end_projection: [f64; 3],
+    /// The height of the annotation's text box.
+    pub box_height: f64,
+    /// The width of the annotation's text box.
+    pub box_width: f64,
+    /// The hook line lies along the x direction.
+    pub hook_line_on_x: bool,
+    /// The leader has an arrowhead.
+    pub arrowhead: bool,
+    /// The annotation the leader is attached to.
+    pub annotation: Option<u64>,
+    /// The dimension style.
+    pub style: Option<u64>,
+}
+
+fn read_leader(r: &mut BitReader<'_>, version: Version) -> Result<Leader, BitError> {
+    // The leaders of R2010 and later in the files seen are shorter than the fields
+    // the specification lists for the part after the vertices, and what the
+    // difference is has not been worked out; reading on would give wrong numbers.
+    if version >= Version::R2010 {
+        return Err(BitError::Unsupported {
+            form: "a leader of R2010 and later",
+        });
+    }
+    r.bit()?; // always zero
+    let annotation_type = r.bit_short()?;
+    let path_type = r.bit_short()?;
+    let count = bounded_count(r, "leader vertex count")?;
+    let mut points = Vec::with_capacity(count);
+    for _ in 0..count {
+        points.push(r.point_3bd()?);
+    }
+    let origin = r.point_3bd()?;
+    let extrusion = r.point_3bd()?;
+    let x_direction = r.point_3bd()?;
+    let block_offset = r.point_3bd()?;
+    let end_projection = r.point_3bd()?;
+    let box_height = r.bit_double()?;
+    let box_width = r.bit_double()?;
+    let hook_line_on_x = r.bit()?;
+    let arrowhead = r.bit()?;
+    r.bit_short()?; // unknown
+    r.bit()?; // unknown
+    r.bit()?; // unknown
+    Ok(Leader {
+        annotation_type,
+        path_type,
+        points,
+        origin,
+        extrusion,
+        x_direction,
+        block_offset,
+        end_projection,
+        box_height,
+        box_width,
+        hook_line_on_x,
+        arrowhead,
+        annotation: None,
+        style: None,
     })
 }

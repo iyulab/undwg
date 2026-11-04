@@ -216,19 +216,6 @@ impl<'a> BitReader<'a> {
         Ok(f64::from_le_bytes(b))
     }
 
-    /// A bit triplet (3B): one to three bits, reading until a zero bit or
-    /// the third bit, each new bit shifted in from the right.
-    pub fn bit_triplet(&mut self) -> Result<u8, EndOfData> {
-        let mut v = 0u8;
-        for _ in 0..3 {
-            v = (v << 1) | u8::from(self.bit()?);
-            if v & 1 == 0 {
-                break;
-            }
-        }
-        Ok(v)
-    }
-
     /// A bitshort (BS): `00` a short follows, `01` a byte follows, `10` zero,
     /// `11` 256.
     pub fn bit_short(&mut self) -> Result<i16, EndOfData> {
@@ -251,13 +238,16 @@ impl<'a> BitReader<'a> {
         })
     }
 
-    /// A bitlonglong (BLL): a bit triplet gives how many bytes follow, least
-    /// significant byte first.
+    /// A bitlonglong (BLL): three bits, plainly, give how many bytes follow,
+    /// least significant byte first. (The specification points to the bit
+    /// triplet for the length; real files do not agree -- a stored graphic of
+    /// 164 bytes is `001` and one byte, and reading it as a triplet gives
+    /// nothing.)
     pub fn bit_long_long(&mut self) -> Result<u64, BitError> {
-        let len = self.bit_triplet()?;
+        let len = self.bits(3)? as u32;
         let mut v = 0u64;
         for i in 0..len {
-            v |= u64::from(self.raw_char()?) << (8 * u32::from(i));
+            v |= u64::from(self.raw_char()?) << (8 * i);
         }
         Ok(v)
     }
@@ -504,22 +494,19 @@ mod tests {
     }
 
     #[test]
-    fn a_bit_triplet_reads_until_a_zero_or_three_bits() {
-        let data = pack("0 10 110 111");
-        let mut r = BitReader::new(&data);
-        assert_eq!(r.bit_triplet().unwrap(), 0b0);
-        assert_eq!(r.bit_triplet().unwrap(), 0b10);
-        assert_eq!(r.bit_triplet().unwrap(), 0b110);
-        assert_eq!(r.bit_triplet().unwrap(), 0b111);
-    }
-
-    #[test]
-    fn a_bitlonglong_has_its_length_in_a_triplet() {
-        // The triplet "10" reads as 2: two bytes follow, least significant first.
-        let data = pack("10 00110100 00010010");
+    fn a_bitlonglong_has_its_length_in_three_bits() {
+        // "010" is 2: two bytes follow, least significant first.
+        let data = pack("010 00110100 00010010");
         assert_eq!(BitReader::new(&data).bit_long_long().unwrap(), 0x1234);
-        // length 0 (0): the value is 0.
-        assert_eq!(BitReader::new(&pack("0")).bit_long_long().unwrap(), 0);
+        // "001" is 1: one byte follows (a graphic of 164 bytes).
+        assert_eq!(
+            BitReader::new(&pack("001 10100100"))
+                .bit_long_long()
+                .unwrap(),
+            164
+        );
+        // length 0: the value is 0.
+        assert_eq!(BitReader::new(&pack("000")).bit_long_long().unwrap(), 0);
     }
 
     #[test]
