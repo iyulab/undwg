@@ -26,14 +26,15 @@ mod header;
 mod lz;
 mod objects;
 mod sections;
+mod tables;
 mod version;
 
-pub use bits::{BitError, BitReader, EndOfData, HandleRef};
+pub use bits::{BitError, BitReader, EndOfData, HandleRef, TextValue};
 pub use classes::{read_classes, ClassDef, ClassError};
 pub use entities::{
     read_entity, Arc, Circle, CommonEntity, Ellipse, Entity, Face3d, Geometry, Insert, Line,
-    LwPolyline, LwVertex, Point, References, Solid, TYPE_3DFACE, TYPE_ARC, TYPE_CIRCLE,
-    TYPE_ELLIPSE, TYPE_INSERT, TYPE_LINE, TYPE_LWPOLYLINE, TYPE_POINT, TYPE_SOLID,
+    LwPolyline, LwVertex, Point, References, Solid, Text, TYPE_3DFACE, TYPE_ARC, TYPE_CIRCLE,
+    TYPE_ELLIPSE, TYPE_INSERT, TYPE_LINE, TYPE_LWPOLYLINE, TYPE_POINT, TYPE_SOLID, TYPE_TEXT,
 };
 pub use header::{
     read_header, FileHeader, HeaderError, HeaderR2000, HeaderR2004, SectionLocator,
@@ -45,4 +46,5 @@ pub use sections::{
     read_data_page, read_directory, read_section, DataPageHeader, PageMapEntry, SectionDescription,
     SectionDirectory, SectionError, SectionPage,
 };
+pub use tables::{read_block_name, TYPE_BLOCK_HEADER};
 pub use version::{detect_version, Error, Unsupported, Version};

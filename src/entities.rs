@@ -13,8 +13,8 @@
 //! the main stream exactly and the handles must reach the end of the data,
 //! which is what makes a wrongly positioned read show up.
 
-use crate::bits::{BitError, BitReader};
-use crate::objects::{open_object, ObjectEntry, ObjectError};
+use crate::bits::{BitError, BitReader, TextValue};
+use crate::objects::{open_object, skip_extended_data, ObjectEntry, ObjectError};
 use crate::version::Version;
 
 /// The type code of an arc.
@@ -25,6 +25,8 @@ pub const TYPE_CIRCLE: u16 = 18;
 pub const TYPE_LINE: u16 = 19;
 /// The type code of a point.
 pub const TYPE_POINT: u16 = 27;
+/// The type code of a text.
+pub const TYPE_TEXT: u16 = 1;
 /// The type code of a block insertion.
 pub const TYPE_INSERT: u16 = 7;
 /// The type code of an ellipse.
@@ -158,6 +160,40 @@ pub struct Ellipse {
     pub end_angle: f64,
 }
 
+/// A line of text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Text {
+    /// The z of the insertion point (`0` when none is stated).
+    pub elevation: f64,
+    /// The insertion point, in the text's own plane.
+    pub insertion: [f64; 2],
+    /// The second alignment point, when the text states one (the insertion
+    /// point stands in for it otherwise).
+    pub alignment: Option<[f64; 2]>,
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// The thickness.
+    pub thickness: f64,
+    /// The oblique angle, in radians (`0` when none is stated).
+    pub oblique: f64,
+    /// The rotation, in radians (`0` when none is stated).
+    pub rotation: f64,
+    /// The text height.
+    pub height: f64,
+    /// The width factor (`1` when none is stated).
+    pub width_factor: f64,
+    /// The text.
+    pub value: TextValue,
+    /// The generation flags (`0` when none are stated).
+    pub generation: i16,
+    /// The horizontal alignment: left `0`, centre `1`, right `2`, aligned `3`, middle `4`, fit `5`.
+    pub horizontal: i16,
+    /// The vertical alignment: baseline `0`, bottom `1`, middle `2`, top `3`.
+    pub vertical: i16,
+    /// The handle of the text style.
+    pub style: u64,
+}
+
 /// A block insertion. The block it inserts is named by a handle in the
 /// object's handle stream, which this reader does not read.
 #[derive(Debug, Clone, PartialEq)]
@@ -264,6 +300,8 @@ pub enum Geometry {
     LwPolyline(LwPolyline),
     /// A block insertion.
     Insert(Insert),
+    /// A line of text.
+    Text(Text),
     /// An ellipse.
     Ellipse(Ellipse),
     /// A flat filled area.
@@ -296,16 +334,7 @@ fn read_common(
     }
     let handle = r.handle()?.value;
 
-    // Extended data: sizes, each followed by an application handle and that
-    // many bytes, until a size of zero.
-    let mut size = r.bit_short()?;
-    while size > 0 {
-        r.handle()?;
-        for _ in 0..size {
-            r.raw_char()?;
-        }
-        size = r.bit_short()?;
-    }
+    skip_extended_data(r)?;
 
     // A stored graphic, skipped.
     if r.bit()? {
@@ -619,6 +648,55 @@ fn read_ellipse(r: &mut BitReader<'_>) -> Result<Ellipse, BitError> {
     })
 }
 
+/// Reads a line of text. Its text value is in the string stream from R2007
+/// and in the main stream before; `strings` is that stream when there is one.
+fn read_text(r: &mut BitReader<'_>, strings: Option<&mut BitReader<'_>>) -> Result<Text, BitError> {
+    let flags = r.raw_char()?;
+    let elevation = if flags & 1 == 0 { r.raw_double()? } else { 0.0 };
+    let insertion = [r.raw_double()?, r.raw_double()?];
+    let alignment = if flags & 2 == 0 {
+        Some([
+            r.bit_double_with_default(insertion[0])?,
+            r.bit_double_with_default(insertion[1])?,
+        ])
+    } else {
+        None
+    };
+    let extrusion = r.bit_extrusion()?;
+    let thickness = r.bit_thickness()?;
+    let oblique = if flags & 4 == 0 { r.raw_double()? } else { 0.0 };
+    let rotation = if flags & 8 == 0 { r.raw_double()? } else { 0.0 };
+    let height = r.raw_double()?;
+    let width_factor = if flags & 0x10 == 0 {
+        r.raw_double()?
+    } else {
+        1.0
+    };
+    let value = match strings {
+        Some(s) => s.text(true)?,
+        None => r.text(false)?,
+    };
+    let generation = if flags & 0x20 == 0 { r.bit_short()? } else { 0 };
+    let horizontal = if flags & 0x40 == 0 { r.bit_short()? } else { 0 };
+    let vertical = if flags & 0x80 == 0 { r.bit_short()? } else { 0 };
+    Ok(Text {
+        elevation,
+        insertion,
+        alignment,
+        extrusion,
+        thickness,
+        oblique,
+        rotation,
+        height,
+        width_factor,
+        value,
+        generation,
+        horizontal,
+        vertical,
+        style: 0,
+    })
+}
+
 /// Reads the main-stream fields of a block insertion; the second value is the
 /// count of attributes it owns (R2004 and later), which the handle stream lists.
 fn read_insert(r: &mut BitReader<'_>, version: Version) -> Result<(Insert, usize), BitError> {
@@ -698,6 +776,7 @@ pub fn read_entity(
             | TYPE_POINT
             | TYPE_LWPOLYLINE
             | TYPE_INSERT
+            | TYPE_TEXT
             | TYPE_ELLIPSE
             | TYPE_SOLID
             | TYPE_3DFACE
@@ -711,6 +790,12 @@ pub fn read_entity(
         });
     }
     let mut owned = 0;
+    // From R2007 the text values of an entity are in its string stream.
+    let mut strings = layout.strings.map(|(from, _)| {
+        let mut s = r.clone();
+        s.seek(from);
+        s
+    });
     let mut geometry = match frame.type_code {
         TYPE_LINE => Geometry::Line(read_line(&mut r)?),
         TYPE_POINT => Geometry::Point(read_point(&mut r)?),
@@ -721,6 +806,7 @@ pub fn read_entity(
             owned = count;
             Geometry::Insert(insert)
         }
+        TYPE_TEXT => Geometry::Text(read_text(&mut r, strings.as_mut())?),
         TYPE_ELLIPSE => Geometry::Ellipse(read_ellipse(&mut r)?),
         TYPE_SOLID => Geometry::Solid(read_solid(&mut r)?),
         TYPE_3DFACE => Geometry::Face3d(read_face3d(&mut r)?),
@@ -733,9 +819,25 @@ pub fn read_entity(
             what: "entity data length",
         });
     }
+    // The string stream, when there is one, must be read to its end too.
+    if let (Some(s), Some((_, to))) = (&strings, layout.strings) {
+        if s.position() != to {
+            return Err(ObjectError::Unexpected {
+                what: "entity string length",
+            });
+        }
+    }
     let mut h = r.clone();
     h.seek(layout.handle_start);
     let references = read_references(&mut h, &common, flags)?;
+    if let Geometry::Text(text) = &mut geometry {
+        text.style = h
+            .handle()?
+            .resolve(common.handle)
+            .ok_or(ObjectError::Unexpected {
+                what: "text style handle",
+            })?;
+    }
     if let Geometry::Insert(insert) = &mut geometry {
         insert.block = h
             .handle()?

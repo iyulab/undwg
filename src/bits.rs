@@ -45,6 +45,8 @@ pub enum BitError {
         /// Which value form.
         form: &'static str,
     },
+    /// A text holds characters that spell nothing (an unpaired surrogate).
+    BadText,
 }
 
 impl fmt::Display for BitError {
@@ -55,6 +57,7 @@ impl fmt::Display for BitError {
                 write!(f, "a {form} holds the code the format marks as not used")
             }
             BitError::TooLong { form } => write!(f, "a {form} is longer than its integer"),
+            BitError::BadText => write!(f, "a text holds characters that spell nothing"),
         }
     }
 }
@@ -89,6 +92,31 @@ impl HandleRef {
             10 => holder.checked_add(self.value),
             12 => holder.checked_sub(self.value),
             _ => None,
+        }
+    }
+}
+
+/// A text value as the file stores it.
+///
+/// Before R2007 a text is bytes in the drawing's code page; from R2007 it is
+/// UTF-16. The bytes are kept as they are -- the code page is a property of
+/// the drawing, not of the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextValue {
+    /// Bytes in the drawing's code page, without the closing zero.
+    Ansi(Vec<u8>),
+    /// Unicode text.
+    Unicode(String),
+}
+
+impl TextValue {
+    /// The text when it can be told without knowing a code page: Unicode text,
+    /// or bytes that are all ASCII.
+    pub fn plain(&self) -> Option<String> {
+        match self {
+            TextValue::Ansi(b) if b.is_ascii() => Some(b.iter().map(|&c| char::from(c)).collect()),
+            TextValue::Ansi(_) => None,
+            TextValue::Unicode(s) => Some(s.clone()),
         }
     }
 }
@@ -361,6 +389,43 @@ impl<'a> BitReader<'a> {
             value = (value << 8) | u64::from(self.raw_char()?);
         }
         Ok(HandleRef { code, value })
+    }
+
+    /// A text (TV from the main stream before R2007, TU in the string stream
+    /// after): a bit short length, then that many characters of one byte
+    /// (`unicode` false) or two bytes (`unicode` true). The length counts the
+    /// closing zero when the file stores one; trailing zeros are dropped.
+    pub fn text(&mut self, unicode: bool) -> Result<TextValue, BitError> {
+        let len = usize::try_from(self.bit_short()?).map_err(|_| BitError::TooLong {
+            form: "text length",
+        })?;
+        let width = if unicode { 16 } else { 8 };
+        if len.saturating_mul(width) > self.remaining() {
+            return Err(BitError::TooLong {
+                form: "text length",
+            });
+        }
+        if unicode {
+            let mut units = Vec::with_capacity(len);
+            for _ in 0..len {
+                units.push(self.raw_short()?);
+            }
+            while units.last() == Some(&0) {
+                units.pop();
+            }
+            String::from_utf16(&units)
+                .map(TextValue::Unicode)
+                .map_err(|_| BitError::BadText)
+        } else {
+            let mut bytes = Vec::with_capacity(len);
+            for _ in 0..len {
+                bytes.push(self.raw_char()?);
+            }
+            while bytes.last() == Some(&0) {
+                bytes.pop();
+            }
+            Ok(TextValue::Ansi(bytes))
+        }
     }
 
     /// An object type as R2010 and later write it: a bit pair, then one byte
@@ -680,5 +745,37 @@ mod tests {
         // below zero and unknown codes name nothing
         assert_eq!(at(12, 0x200), None);
         assert_eq!(at(7, 1), None);
+    }
+
+    #[test]
+    fn a_code_page_text_drops_its_closing_zero() {
+        // length 3 (bit short: 01 + 00000011), then 'h' 'i' and the closing zero
+        let data = pack("01 00000011 01101000 01101001 00000000");
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.text(false), Ok(TextValue::Ansi(b"hi".to_vec())));
+        assert_eq!(
+            TextValue::Ansi(b"hi".to_vec()).plain(),
+            Some("hi".to_string())
+        );
+        assert_eq!(TextValue::Ansi(vec![0xB0]).plain(), None);
+    }
+
+    #[test]
+    fn a_unicode_text_is_utf16_least_significant_byte_first() {
+        // length 2, then U+00E9 and the closing zero
+        let data = pack("01 00000010 11101001 00000000 00000000 00000000");
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.text(true), Ok(TextValue::Unicode("\u{e9}".to_string())));
+    }
+
+    #[test]
+    fn an_unpaired_surrogate_or_an_oversized_length_is_refused() {
+        let data = pack("01 00000001 00000000 11011000");
+        assert_eq!(BitReader::new(&data).text(true), Err(BitError::BadText));
+        let data = pack("01 11111111 00000000");
+        assert!(matches!(
+            BitReader::new(&data).text(false),
+            Err(BitError::TooLong { .. })
+        ));
     }
 }

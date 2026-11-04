@@ -12,9 +12,27 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use undwg::{
-    read_classes, read_directory, read_entity, read_header, read_object_frame, read_object_map,
-    read_section, FileHeader, Geometry, Version,
+    read_block_name, read_classes, read_directory, read_entity, read_header, read_object_frame,
+    read_object_map, read_section, FileHeader, Geometry, TextValue, Version,
 };
+
+/// A text as the dump writes it: `U:` and the hex of its UTF-8 for Unicode
+/// text, `A:` and the hex of its bytes for code-page text.
+fn text_hex(t: &TextValue) -> String {
+    match t {
+        TextValue::Ansi(b) => format!(
+            "A:{}",
+            b.iter().map(|c| format!("{c:02x}")).collect::<String>()
+        ),
+        TextValue::Unicode(s) => format!(
+            "U:{}",
+            s.as_bytes()
+                .iter()
+                .map(|c| format!("{c:02x}"))
+                .collect::<String>()
+        ),
+    }
+}
 
 fn dwg_files(dir: &Path, into: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -64,8 +82,10 @@ fn every_real_line_circle_and_arc_reads() {
         mut ellipses,
         mut solids,
         mut faces,
+        mut texts,
         mut failed,
-    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
+    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
+    let mut named_blocks = 0usize;
     let mut references_checked = 0usize;
     for path in &files {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -105,6 +125,16 @@ fn every_real_line_circle_and_arc_reads() {
                     .map(|f| (e.handle, f.type_code))
             })
             .collect();
+        // The name of every block header, to name what an insertion inserts.
+        let block_names: std::collections::BTreeMap<u64, TextValue> = entries
+            .iter()
+            .filter(|e| e.offset < objects.len() as u64)
+            .filter_map(|e| match read_block_name(&objects, *e, version) {
+                Ok(Some(name)) => Some((e.handle, name)),
+                Ok(None) => None,
+                Err(err) => panic!("{}: block header {:#x}: {err}", path.display(), e.handle),
+            })
+            .collect();
         for entry in &entries {
             if entry.offset >= objects.len() as u64 {
                 continue;
@@ -113,7 +143,7 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 7 | 17..=19 | 27 | 28 | 31 | 35 | 77) {
+            if !matches!(frame.type_code, 1 | 7 | 17..=19 | 27 | 28 | 31 | 35 | 77) {
                 continue;
             }
             let entity = match read_entity(&objects, *entry, version) {
@@ -159,6 +189,15 @@ fn every_real_line_circle_and_arc_reads() {
             }
             if let Geometry::Insert(i) = &entity.geometry {
                 expect(i.block, 49, "inserted block");
+                assert!(
+                    block_names.contains_key(&i.block),
+                    "{}: {:#x}: the inserted block has no name",
+                    path.display(),
+                    entry.handle
+                );
+            }
+            if let Geometry::Text(t) = &entity.geometry {
+                expect(t.style, 53, "text style");
             }
             references_checked += 1;
             let name = match &entity.geometry {
@@ -254,9 +293,45 @@ fn every_real_line_circle_and_arc_reads() {
                         path.display(),
                         entry.handle
                     );
+                    named_blocks += 1;
                     format!(
-                        "INSERT\t{:?}\t{:?}\t{:?}\t{:?}",
-                        i.position, i.scale, i.rotation, i.extrusion
+                        "INSERT\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+                        i.position,
+                        i.scale,
+                        i.rotation,
+                        i.extrusion,
+                        text_hex(&block_names[&i.block])
+                    )
+                }
+                Geometry::Text(t) => {
+                    texts += 1;
+                    assert!(
+                        t.elevation.is_finite()
+                            && finite(&t.insertion)
+                            && finite(&t.extrusion)
+                            && t.height.is_finite()
+                            && t.rotation.is_finite(),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    // elevation, insertion, alignment flag and point, extrusion,
+                    // oblique, rotation, height, width factor, horizontal, vertical, text
+                    let a = t.alignment.unwrap_or([0.0, 0.0]);
+                    format!(
+                        "TEXT\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+                        t.elevation,
+                        t.insertion,
+                        i32::from(t.alignment.is_some()),
+                        a,
+                        t.extrusion,
+                        t.oblique,
+                        t.rotation,
+                        t.height,
+                        t.width_factor,
+                        (t.horizontal, t.vertical),
+                        t.generation,
+                        text_hex(&t.value)
                     )
                 }
                 Geometry::Ellipse(e) => {
@@ -315,7 +390,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces read; {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");

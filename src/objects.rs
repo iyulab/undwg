@@ -318,6 +318,20 @@ pub(crate) fn open_object<'a>(
     ))
 }
 
+/// Skips the extended data an object or entity opens with: sizes, each
+/// followed by an application handle and that many bytes, until a size of zero.
+pub(crate) fn skip_extended_data(r: &mut BitReader<'_>) -> Result<(), BitError> {
+    let mut size = r.bit_short()?;
+    while size > 0 {
+        r.handle()?;
+        for _ in 0..size {
+            r.raw_char()?;
+        }
+        size = r.bit_short()?;
+    }
+    Ok(())
+}
+
 /// Finds the string stream that precedes the handles (R2007 and later).
 ///
 /// The last bit before the handle stream says whether there is one. If so, the
