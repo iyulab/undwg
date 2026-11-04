@@ -21,6 +21,9 @@ pub const TYPE_LINETYPE: u16 = 57;
 /// The type code of a dimension style.
 pub const TYPE_DIMSTYLE: u16 = 69;
 
+/// The type code of a multiline style.
+pub const TYPE_MLINESTYLE: u16 = 73;
+
 /// Reads the name of the block header at `entry`; `Ok(None)` when the object
 /// is of another kind.
 ///
@@ -52,6 +55,16 @@ pub fn read_linetype_name(
     version: Version,
 ) -> Result<Option<TextValue>, ObjectError> {
     read_table_name(objects, entry, version, TYPE_LINETYPE)
+}
+
+/// Reads the name of the multiline style at `entry`; `Ok(None)` when the
+/// object is of another kind.
+pub fn read_mlinestyle_name(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<Option<TextValue>, ObjectError> {
+    read_table_name(objects, entry, version, TYPE_MLINESTYLE)
 }
 
 fn read_table_name(

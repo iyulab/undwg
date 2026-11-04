@@ -85,6 +85,8 @@ pub const TYPE_LWPOLYLINE: u16 = 77;
 pub const TYPE_VIEWPORT: u16 = 34;
 /// The type code of a leader.
 pub const TYPE_LEADER: u16 = 45;
+/// The type code of a multiline.
+pub const TYPE_MLINE: u16 = 47;
 
 /// What every entity states about itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -775,6 +777,8 @@ pub enum Geometry {
     Image(Image),
     /// A leader.
     Leader(Leader),
+    /// A multiline.
+    Mline(Mline),
 }
 
 /// An entity: its common data and its geometry.
@@ -1940,6 +1944,7 @@ pub fn read_entity_with_classes(
                 | TYPE_VIEWPORT
                 | TYPE_IMAGE
                 | TYPE_LEADER
+                | TYPE_MLINE
     ) {
         return Ok(None);
     }
@@ -2028,6 +2033,7 @@ pub fn read_entity_with_classes(
         TYPE_3DFACE => Geometry::Face3d(read_face3d(&mut r)?),
         TYPE_IMAGE => Geometry::Image(read_image(&mut r, version)?),
         TYPE_LEADER => Geometry::Leader(read_leader(&mut r, version)?),
+        TYPE_MLINE => Geometry::Mline(read_mline(&mut r)?),
         TYPE_VIEWPORT => {
             let (viewport, frozen) = read_viewport(&mut r, &mut strings, version)?;
             frozen_layer_count = frozen;
@@ -2119,6 +2125,9 @@ pub fn read_entity_with_classes(
             next()?; // the shade plot object
             next()?; // the sun
         }
+    }
+    if let Geometry::Mline(m) = &mut geometry {
+        m.style = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
     }
     if let Geometry::Leader(l) = &mut geometry {
         l.annotation = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
@@ -2493,4 +2502,95 @@ fn read_leader(r: &mut BitReader<'_>, version: Version) -> Result<Leader, BitErr
         annotation: None,
         style: None,
     })
+}
+
+/// A multiline: several parallel lines drawn along one path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mline {
+    /// The scale of the style's offsets.
+    pub scale: f64,
+    /// Which line follows the path: top `0`, centre `1`, bottom `2`.
+    pub justification: u8,
+    /// The base point.
+    pub base_point: [f64; 3],
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// `1` open, `3` closed.
+    pub open_closed: i16,
+    /// How many lines the style has.
+    pub lines_in_style: u8,
+    /// The vertices of the path.
+    pub vertices: Vec<MlineVertex>,
+    /// The multiline style.
+    pub style: Option<u64>,
+}
+
+/// A vertex of a multiline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MlineVertex {
+    /// The vertex.
+    pub point: [f64; 3],
+    /// The direction of the segment that starts here.
+    pub direction: [f64; 3],
+    /// The direction of the miter at the vertex.
+    pub miter: [f64; 3],
+    /// For each line of the style, the segment parameters (dash lengths).
+    pub segment_parameters: Vec<Vec<f64>>,
+    /// For each line of the style, the area fill parameters.
+    pub area_fill_parameters: Vec<Vec<f64>>,
+}
+
+fn read_mline(r: &mut BitReader<'_>) -> Result<Mline, BitError> {
+    let scale = r.bit_double()?;
+    let justification = r.raw_char()?;
+    let base_point = r.point_3bd()?;
+    let extrusion = r.point_3bd()?;
+    let open_closed = r.bit_short()?;
+    let lines_in_style = r.raw_char()?;
+    let count = usize::try_from(r.bit_short()?).map_err(|_| BitError::TooLong {
+        form: "multiline vertex count",
+    })?;
+    if count > r.remaining() {
+        return Err(BitError::TooLong {
+            form: "multiline vertex count",
+        });
+    }
+    let mut vertices = Vec::with_capacity(count);
+    for _ in 0..count {
+        let point = r.point_3bd()?;
+        let direction = r.point_3bd()?;
+        let miter = r.point_3bd()?;
+        let mut segment_parameters = Vec::new();
+        let mut area_fill_parameters = Vec::new();
+        for _ in 0..lines_in_style {
+            segment_parameters.push(read_bit_doubles(r, "multiline segment parameter count")?);
+            area_fill_parameters.push(read_bit_doubles(r, "multiline area fill parameter count")?);
+        }
+        vertices.push(MlineVertex {
+            point,
+            direction,
+            miter,
+            segment_parameters,
+            area_fill_parameters,
+        });
+    }
+    Ok(Mline {
+        scale,
+        justification,
+        base_point,
+        extrusion,
+        open_closed,
+        lines_in_style,
+        vertices,
+        style: None,
+    })
+}
+
+/// A count (a short) and that many bitdoubles.
+fn read_bit_doubles(r: &mut BitReader<'_>, what: &'static str) -> Result<Vec<f64>, BitError> {
+    let n = usize::try_from(r.bit_short()?).map_err(|_| BitError::TooLong { form: what })?;
+    if n > r.remaining() {
+        return Err(BitError::TooLong { form: what });
+    }
+    (0..n).map(|_| r.bit_double()).collect()
 }

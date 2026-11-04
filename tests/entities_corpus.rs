@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use undwg::{
     read_block_header, read_block_name, read_classes, read_dimstyle_name, read_directory,
     read_entity, read_entity_with_classes, read_header, read_image_definition, read_layer,
-    read_linetype_name, read_object_frame, read_object_map, read_section, FileHeader, Geometry,
-    HatchEdge, TextValue, Version,
+    read_linetype_name, read_mlinestyle_name, read_object_frame, read_object_map, read_section,
+    FileHeader, Geometry, HatchEdge, TextValue, Version,
 };
 
 /// A text as the dump writes it: `U:` and the hex of its UTF-8 for Unicode
@@ -332,6 +332,16 @@ fn every_real_line_circle_and_arc_reads() {
                 .unwrap();
             }
         }
+        // The name of every multiline style.
+        let mline_styles: std::collections::BTreeMap<u64, TextValue> = entries
+            .iter()
+            .filter(|e| e.offset < objects.len() as u64)
+            .filter_map(|e| match read_mlinestyle_name(&objects, *e, version) {
+                Ok(Some(name)) => Some((e.handle, name)),
+                Ok(None) => None,
+                Err(err) => panic!("{}: multiline style {:#x}: {err}", path.display(), e.handle),
+            })
+            .collect();
         // The vertices of 2D and 3D polylines, by handle, with the owner each states.
         let mut vertices_2d = std::collections::BTreeMap::new();
         let mut vertices_3d = std::collections::BTreeMap::new();
@@ -373,7 +383,7 @@ fn every_real_line_circle_and_arc_reads() {
             };
             if !is_hatch(frame.type_code)
                 && !is_class(frame.type_code, "IMAGE")
-                && !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 34 | 40 | 41 | 44 | 45 | 46 | 77)
+                && !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 34 | 40 | 41 | 44 | 45 | 46 | 47 | 77)
             {
                 continue;
             }
@@ -942,6 +952,41 @@ fn every_real_line_circle_and_arc_reads() {
                     );
                     let flat: Vec<f64> = f.corners.iter().flatten().copied().collect();
                     format!("3DFACE\t{:?}\t{:?}", flat, f.invisible_edges)
+                }
+                Geometry::Mline(m) => {
+                    assert!(
+                        m.scale.is_finite()
+                            && finite(&m.base_point)
+                            && finite(&m.extrusion)
+                            && m.vertices.iter().all(|v| finite(&v.point)
+                                && finite(&v.direction)
+                                && finite(&v.miter)),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    let style = m
+                        .style
+                        .map(|h| {
+                            mline_styles.get(&h).map(text_hex).unwrap_or_else(|| {
+                                panic!(
+                                    "{}: {:#x}: the multiline style has no name",
+                                    path.display(),
+                                    entry.handle
+                                )
+                            })
+                        })
+                        .unwrap_or_default();
+                    let points: Vec<[f64; 3]> = m.vertices.iter().map(|v| v.point).collect();
+                    let miters: Vec<[f64; 3]> = m.vertices.iter().map(|v| v.miter).collect();
+                    format!(
+                        "MLINE\t{:?}\t{:?}\t{}\t{:?}\t{:?}",
+                        points,
+                        miters,
+                        u8::from(m.open_closed == 3),
+                        style,
+                        m.scale
+                    )
                 }
                 Geometry::Leader(l) => {
                     assert!(
