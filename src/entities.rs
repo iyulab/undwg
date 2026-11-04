@@ -698,6 +698,14 @@ pub struct References {
     pub reactors: Vec<u64>,
     /// The extension dictionary.
     pub xdictionary: Option<u64>,
+    /// Whether the entity states the entities before and after it in its block
+    /// (R2000 and later where the file keeps links); otherwise they are the
+    /// handles next to its own.
+    pub links_stored: bool,
+    /// The entity before this one in its block, when the links are stored.
+    pub previous: Option<u64>,
+    /// The entity after this one in its block, when the links are stored.
+    pub next: Option<u64>,
     /// The layer.
     pub layer: u64,
     /// The linetype, when the entity has one of its own.
@@ -922,9 +930,10 @@ fn read_references(
     if flags.xdictionary_stored {
         refs.xdictionary = next(h)?;
     }
+    refs.links_stored = flags.links_stored;
     if flags.links_stored {
-        next(h)?; // the previous entity
-        next(h)?; // the next entity
+        refs.previous = next(h)?;
+        refs.next = next(h)?;
     }
     refs.layer = next(h)?.ok_or(ObjectError::Unexpected {
         what: "layer handle",
@@ -1885,6 +1894,46 @@ pub fn read_entity(
     version: Version,
 ) -> Result<Option<Entity>, ObjectError> {
     read_entity_with_classes(objects, entry, version, &[])
+}
+
+/// The entities before and after the entity at `entry` in its block.
+///
+/// R2000 keeps a block's entities as a chain: the block header names the first
+/// and the last, and each entity names its neighbours. This reads the links
+/// of an entity of any kind -- only the data every entity has and the handle
+/// stream, never its geometry.
+pub fn read_entity_links(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<EntityLinks, ObjectError> {
+    let (_, mut r, layout) = open_object(objects, entry, version)?;
+    let (common, flags) = read_common(&mut r, version)?;
+    if common.handle != entry.handle {
+        return Err(ObjectError::Unexpected {
+            what: "entity handle",
+        });
+    }
+    let mut h = r.clone();
+    h.seek(layout.handle_start);
+    let references = read_references(&mut h, &common, flags)?;
+    Ok(EntityLinks {
+        stored: references.links_stored,
+        previous: references.previous,
+        next: references.next,
+    })
+}
+
+/// The neighbours of an entity in its block, as [`read_entity_links`] reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntityLinks {
+    /// Whether the file states the neighbours; when it does not, they are the
+    /// handles next to the entity's own.
+    pub stored: bool,
+    /// The entity before this one.
+    pub previous: Option<u64>,
+    /// The entity after this one.
+    pub next: Option<u64>,
 }
 
 /// Like [`read_entity`], and also reads the kinds that have no fixed type

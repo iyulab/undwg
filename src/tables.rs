@@ -249,7 +249,7 @@ fn read_table_color(
     version: Version,
 ) -> Result<TableColor, BitError> {
     if version >= Version::R2004 {
-        r.bit_short()?; // always zero
+        let index = r.bit_short()? as u16;
         let rgb = r.bit_long()? as u32;
         let names = r.raw_char()?;
         if names & 1 != 0 {
@@ -261,11 +261,14 @@ fn read_table_color(
         Ok(TableColor {
             method: (rgb >> 24) as u8,
             value: rgb & 0x00FF_FFFF,
+            index,
         })
     } else {
+        let value = r.bit_short()? as u16;
         Ok(TableColor {
             method: 0xC3,
-            value: r.bit_short()? as u16 as u32,
+            value: u32::from(value),
+            index: value,
         })
     }
 }
@@ -282,6 +285,10 @@ pub struct TableColor {
     pub method: u8,
     /// The colour number, or the 24-bit RGB value of a true colour.
     pub value: u32,
+    /// The colour number the entry also states (R2004 and later keep it next
+    /// to the packed colour; it is the number a reader without true colour
+    /// would show). For R2000 it is the colour number itself.
+    pub index: u16,
 }
 
 /// A layer: a table entry that entities refer to by handle.
@@ -380,6 +387,14 @@ pub struct BlockHeader {
     pub description: TextValue,
     /// The block control object that owns the entry.
     pub owner: Option<u64>,
+    /// The entities the block owns, in drawing order (R2004 and later; an
+    /// external reference owns none).
+    pub owned_entities: Vec<u64>,
+    /// The first entity of the block (R2000, which states a chain: the
+    /// entities link to the next one), and
+    pub first_entity: Option<u64>,
+    /// the last.
+    pub last_entity: Option<u64>,
 }
 
 /// Reads the block header at `entry`; `Ok(None)` when the object is of another
@@ -408,9 +423,11 @@ pub fn read_block_header(
     o.r.bit()?; // loaded
                 // An external reference owns no objects, and states no count (real files
                 // end exactly where the fields do only without it).
-    if version >= Version::R2004 && !is_xref && !xref_overlaid {
-        o.r.bit_long()?; // the number of objects the block owns
-    }
+    let owned_count = if version >= Version::R2004 && !is_xref && !xref_overlaid {
+        o.r.bit_long()? // the number of objects the block owns
+    } else {
+        0
+    };
     let base_point = [o.r.bit_double()?, o.r.bit_double()?, o.r.bit_double()?];
     let xref_path = text_value(&mut o.r, &mut o.strings)?;
     // Insert counts: bytes up to a zero.
@@ -432,7 +449,28 @@ pub fn read_block_header(
         o.r.raw_char()?; // scaling
     }
     o.check_main_end("block header main data length")?;
-    let (_, owner) = o.handles(entry.handle)?;
+    let (mut handles, owner) = o.handles(entry.handle)?;
+    handles.next()?; // a null handle
+    handles.next()?; // the block entity
+    let (mut owned_entities, mut first_entity, mut last_entity) = (Vec::new(), None, None);
+    if version < Version::R2004 {
+        if !is_xref && !xref_overlaid {
+            first_entity = handles.next()?;
+            last_entity = handles.next()?;
+        }
+    } else {
+        let count = usize::try_from(owned_count)
+            .ok()
+            .filter(|&n| n <= handles.h.remaining() / 8)
+            .ok_or(ObjectError::Unexpected {
+                what: "owned object count",
+            })?;
+        for _ in 0..count {
+            owned_entities.push(handles.next()?.ok_or(ObjectError::Unexpected {
+                what: "owned object handle",
+            })?);
+        }
+    }
     Ok(Some(BlockHeader {
         handle: entry.handle,
         name: o.name,
@@ -444,6 +482,9 @@ pub fn read_block_header(
         xref_path,
         description,
         owner,
+        owned_entities,
+        first_entity,
+        last_entity,
     }))
 }
 
@@ -718,6 +759,7 @@ mod tests {
             color: TableColor {
                 method: 0xC3,
                 value: 7,
+                index: 0,
             },
             owner: None,
             xref_block: None,

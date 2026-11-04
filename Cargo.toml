@@ -24,3 +24,8 @@ unsafe_code = "forbid"
 # `disallowed-types`; this restriction lint additionally covers `for` loops
 # over any other hash-based type.
 iter_over_hash_type = "warn"
+
+[dependencies]
+# The model a drawing is read into. A version dependency, never a path: this
+# crate must build from a standalone checkout.
+uncad-model = "0.11.0"

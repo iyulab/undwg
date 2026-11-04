@@ -40,7 +40,8 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | Multilines and multiline style names (R2000, R2004 and later) | done |
 | Dimension styles (R2000, R2004 and later) | done |
 | Header variables: units, extents, current layer and styles, dimension defaults, table and dictionary handles (R2000, R2004 and later) | done |
-| Other entities, other tables | planned |
+| Whole drawing into the `uncad-model` entity model (`read_database`): header, layers, blocks and their drawing order, lines, circles, arcs, points | done |
+| The other entity kinds and tables in the model (text, dimensions, polylines, insertions, hatches, ...; dimension styles, layouts) | planned |
 
 Files older than R2000 are an explicit error that names the version bytes it found. Writing DWG is out of scope.
 
