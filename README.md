@@ -26,7 +26,8 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | File header of R2007 | planned |
 | Section page map, section map, decompression, section assembly (R2004 and later) | done |
 | Sections of R2000 | in progress |
-| Object stream, handle map, classes | planned |
+| Bit-coded values, class definitions (R2004 and later, R2007 excepted) | done |
+| Object stream, handle map | planned |
 | Entities, tables, blocks, header variables | planned |
 
 Files older than R2000 are an explicit error that names the version bytes it found. Writing DWG is out of scope.

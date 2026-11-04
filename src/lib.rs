@@ -18,12 +18,16 @@
 
 #![doc(html_root_url = "https://docs.rs/undwg")]
 
+mod bits;
 mod checksum;
+mod classes;
 mod header;
 mod lz;
 mod sections;
 mod version;
 
+pub use bits::{BitError, BitReader, EndOfData, HandleRef};
+pub use classes::{read_classes, ClassDef, ClassError};
 pub use header::{
     read_header, FileHeader, HeaderError, HeaderR2000, HeaderR2004, SectionLocator,
     SECTION_PAGE_MAP_BIAS,
