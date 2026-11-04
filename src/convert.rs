@@ -22,7 +22,8 @@ use uncad_model::model::{
     TextOverride, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
 };
 use uncad_model::tables::{
-    BlockRecord, ExternalReference, ImageDefinition, LayerRecord, ResolutionUnit, Tables,
+    AngularUnitFormat, ArcSymbol, BlockRecord, DimStyleRecord, ExternalReference, FractionFormat,
+    ImageDefinition, LayerRecord, LinearUnitFormat, ResolutionUnit, Tables,
 };
 use uncad_model::text::decode_escapes;
 use uncad_model::{CadDatabase, Entity, HeaderVariables as ModelHeader, ReadDiagnostics};
@@ -32,7 +33,7 @@ use crate::drawing::{Drawing, DrawingError};
 use crate::entities::{self, read_entity_links, read_entity_with_classes, Geometry};
 use crate::objects::ObjectEntry;
 use crate::tables::{
-    read_appid_name, read_block_control, read_block_header, read_dimstyle_name,
+    read_appid_name, read_block_control, read_block_header, read_dim_style, read_dimstyle_name,
     read_image_definition, read_layer, read_linetype_name, read_mlinestyle_name, read_style_name,
     BlockHeader, Layer,
 };
@@ -150,6 +151,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let mut styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut dim_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut acad: Option<u64> = None;
+    let mut dim_style_rows: Vec<crate::tables::DimStyle> = Vec::new();
     let mut image_defs: BTreeMap<u64, crate::tables::ImageDefinition> = BTreeMap::new();
     let mut mline_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut headers: Vec<BlockHeader> = Vec::new();
@@ -185,6 +187,18 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             Ok(None) => {}
             Err(_) => {
                 notes.add("text style that could not be read");
+                continue;
+            }
+        }
+        match read_dim_style(objects, *e, version) {
+            Ok(Some(style)) => {
+                dim_styles.insert(e.handle, style.name.clone());
+                dim_style_rows.push(style);
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                notes.add("dimension style that could not be read");
                 continue;
             }
         }
@@ -509,6 +523,42 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         );
     }
 
+    // The dimension styles, by name.
+    let mut dim_style_records: BTreeMap<String, DimStyleRecord> = BTreeMap::new();
+    for d in &dim_style_rows {
+        let (Some(name), Some(post)) = (characters(&d.name), characters(&d.post)) else {
+            notes.add("dimension style in a code page that is not read");
+            continue;
+        };
+        dim_style_records.insert(
+            name.clone(),
+            DimStyleRecord {
+                name,
+                post: Some(post),
+                scale: Some(d.scale),
+                length_factor: Some(d.length_factor),
+                tolerances: Some(d.tolerances),
+                limits: Some(d.limits),
+                tolerance_upper: Some(d.tolerance_upper),
+                tolerance_lower: Some(d.tolerance_lower),
+                decimal_places: Some(i32::from(d.decimal_places)),
+                tolerance_decimal_places: Some(i32::from(d.tolerance_decimal_places)),
+                text_height: Some(d.text_height),
+                arrow_size: Some(d.arrow_size),
+                linear_unit_format: LinearUnitFormat::from_code(i32::from(d.linear_unit_format)),
+                zero_suppression: Some(i32::from(d.zero_suppression)),
+                rounding: Some(d.rounding),
+                angular_unit_format: AngularUnitFormat::from_code(i32::from(d.angular_unit_format)),
+                angular_decimal_places: Some(i32::from(d.angular_decimal_places)),
+                fraction_format: FractionFormat::from_code(i32::from(d.fraction_format)),
+                arc_symbol: d
+                    .arc_symbol
+                    .and_then(|c| ArcSymbol::from_code(i32::from(c))),
+                text_gap: Some(d.text_gap),
+            },
+        );
+    }
+
     // The image definitions, by handle (the key an image names its picture by).
     let mut image_definitions: BTreeMap<String, ImageDefinition> = BTreeMap::new();
     for (handle, def) in &image_defs {
@@ -546,6 +596,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             layers: layer_records,
             block_records,
             image_definitions,
+            dim_styles: dim_style_records,
             ..Tables::default()
         },
         header,
