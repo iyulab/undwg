@@ -27,6 +27,8 @@ pub const TYPE_LINE: u16 = 19;
 pub const TYPE_POINT: u16 = 27;
 /// The type code of a text.
 pub const TYPE_TEXT: u16 = 1;
+/// The type code of a spline.
+pub const TYPE_SPLINE: u16 = 36;
 /// The type code of an ordinate dimension.
 pub const TYPE_DIMENSION_ORDINATE: u16 = 20;
 /// The type code of a linear (rotated) dimension.
@@ -212,6 +214,46 @@ pub struct Text {
     pub vertical: i16,
     /// The handle of the text style.
     pub style: u64,
+}
+
+/// A spline: a curve given by control points and knots, or by points it passes through.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spline {
+    /// The scenario the file states: `1` control points and knots, `2` fit points only (from R2013 the
+    /// fit-point flag of `flags` is the reliable sign, see `fit_data`).
+    pub scenario: u32,
+    /// Whether the file states the spline by its fit points (and not by control points and knots).
+    pub fit_data: bool,
+    /// The spline flags (R2013 and later): fit-point method `1`, control frame shown `2`, closed `4`, knot parameter used `8`.
+    pub flags: u32,
+    /// How the knots are derived from fit points (R2013 and later): chord `0`, square root `1`, uniform `2`, custom `15`.
+    pub knot_parameter: u32,
+    /// The degree.
+    pub degree: u32,
+    /// The fit tolerance (fit-point splines).
+    pub fit_tolerance: Option<f64>,
+    /// The tangent at the start (fit-point splines).
+    pub start_tangent: Option<[f64; 3]>,
+    /// The tangent at the end (fit-point splines).
+    pub end_tangent: Option<[f64; 3]>,
+    /// Whether the weights are not all one (control-point splines).
+    pub rational: bool,
+    /// Whether the curve is closed (control-point splines).
+    pub closed: bool,
+    /// Whether the curve is periodic (control-point splines).
+    pub periodic: bool,
+    /// The knot tolerance (control-point splines).
+    pub knot_tolerance: f64,
+    /// The control point tolerance (control-point splines).
+    pub control_tolerance: f64,
+    /// The knots.
+    pub knots: Vec<f64>,
+    /// The control points.
+    pub control_points: Vec<[f64; 3]>,
+    /// The weight of each control point, when the file states weights.
+    pub weights: Vec<f64>,
+    /// The fit points.
+    pub fit_points: Vec<[f64; 3]>,
 }
 
 /// What a dimension measures.
@@ -456,6 +498,8 @@ pub enum Geometry {
     Mtext(Mtext),
     /// A dimension.
     Dimension(Dimension),
+    /// A spline.
+    Spline(Spline),
     /// An attribute of a block insertion.
     Attrib(Attribute),
     /// An attribute definition.
@@ -819,6 +863,84 @@ fn skip_color(r: &mut BitReader<'_>, strings: &mut Option<BitReader<'_>>) -> Res
         text_value(r, strings)?;
     }
     Ok(())
+}
+
+/// Reads a spline.
+fn read_spline(r: &mut BitReader<'_>, version: Version) -> Result<Spline, BitError> {
+    let scenario = u32::try_from(r.bit_long()?).map_err(|_| BitError::TooLong {
+        form: "spline scenario",
+    })?;
+    if !(1..=2).contains(&scenario) {
+        return Err(BitError::Unsupported {
+            form: "a spline scenario other than 1 and 2",
+        });
+    }
+    let (mut flags, mut knot_parameter) = (0, 0);
+    if version >= Version::R2013 {
+        flags = r.bit_long()? as u32;
+        knot_parameter = r.bit_long()? as u32;
+    }
+    let degree = u32::try_from(r.bit_long()?).map_err(|_| BitError::TooLong {
+        form: "spline degree",
+    })?;
+    // Up to R2010 the scenario says which data the file states; from R2013 the
+    // fit-point flag does (the scenario is not trustworthy there: real files
+    // state a fit-point spline with scenario 1).
+    let fit_data = if version >= Version::R2013 {
+        flags & 1 != 0
+    } else {
+        scenario == 2
+    };
+    let mut spline = Spline {
+        scenario,
+        fit_data,
+        flags,
+        knot_parameter,
+        degree,
+        fit_tolerance: None,
+        start_tangent: None,
+        end_tangent: None,
+        rational: false,
+        closed: false,
+        periodic: false,
+        knot_tolerance: 0.0,
+        control_tolerance: 0.0,
+        knots: Vec::new(),
+        control_points: Vec::new(),
+        weights: Vec::new(),
+        fit_points: Vec::new(),
+    };
+    let (mut knot_count, mut control_count, mut fit_count, mut weighted) = (0, 0, 0, false);
+    if fit_data {
+        // From R2013 the closed flag of a fit-point spline is in the spline flags.
+        spline.closed = version >= Version::R2013 && flags & 4 != 0;
+        spline.fit_tolerance = Some(r.bit_double()?);
+        spline.start_tangent = Some(r.point_3bd()?);
+        spline.end_tangent = Some(r.point_3bd()?);
+        fit_count = bounded_count(r, "spline fit point count")?;
+    } else {
+        spline.rational = r.bit()?;
+        spline.closed = r.bit()?;
+        spline.periodic = r.bit()?;
+        spline.knot_tolerance = r.bit_double()?;
+        spline.control_tolerance = r.bit_double()?;
+        knot_count = bounded_count(r, "spline knot count")?;
+        control_count = bounded_count(r, "spline control point count")?;
+        weighted = r.bit()?;
+    }
+    for _ in 0..knot_count {
+        spline.knots.push(r.bit_double()?);
+    }
+    for _ in 0..control_count {
+        spline.control_points.push(r.point_3bd()?);
+        if weighted {
+            spline.weights.push(r.bit_double()?);
+        }
+    }
+    for _ in 0..fit_count {
+        spline.fit_points.push(r.point_3bd()?);
+    }
+    Ok(spline)
 }
 
 /// Reads a dimension: the data every kind has, then the points of the kind.
@@ -1208,6 +1330,7 @@ pub fn read_entity(
             | TYPE_INSERT
             | TYPE_TEXT
             | TYPE_MTEXT
+            | TYPE_SPLINE
             | TYPE_DIMENSION_ORDINATE
             ..=TYPE_DIMENSION_DIAMETER
                 | TYPE_ATTRIB
@@ -1255,6 +1378,7 @@ pub fn read_entity(
             };
             Geometry::Dimension(read_dimension(&mut r, &mut strings, version, kind)?)
         }
+        TYPE_SPLINE => Geometry::Spline(read_spline(&mut r, version)?),
         TYPE_MTEXT => {
             let (mtext, application) = read_mtext(&mut r, &mut strings, version)?;
             registered_application = application;

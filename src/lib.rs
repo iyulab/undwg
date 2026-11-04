@@ -33,11 +33,12 @@ pub use bits::{BitError, BitReader, EndOfData, HandleRef, TextValue};
 pub use classes::{read_classes, ClassDef, ClassError};
 pub use entities::{
     read_entity, Arc, Attribute, Circle, CommonEntity, Dimension, DimensionKind, Ellipse, Entity,
-    Face3d, Geometry, Insert, Line, LwPolyline, LwVertex, Mtext, Point, References, Solid, Text,
-    TYPE_3DFACE, TYPE_ARC, TYPE_ATTDEF, TYPE_ATTRIB, TYPE_CIRCLE, TYPE_DIMENSION_ALIGNED,
+    Face3d, Geometry, Insert, Line, LwPolyline, LwVertex, Mtext, Point, References, Solid, Spline,
+    Text, TYPE_3DFACE, TYPE_ARC, TYPE_ATTDEF, TYPE_ATTRIB, TYPE_CIRCLE, TYPE_DIMENSION_ALIGNED,
     TYPE_DIMENSION_ANGULAR_2LINE, TYPE_DIMENSION_ANGULAR_3POINT, TYPE_DIMENSION_DIAMETER,
     TYPE_DIMENSION_LINEAR, TYPE_DIMENSION_ORDINATE, TYPE_DIMENSION_RADIUS, TYPE_ELLIPSE,
-    TYPE_INSERT, TYPE_LINE, TYPE_LWPOLYLINE, TYPE_MTEXT, TYPE_POINT, TYPE_SOLID, TYPE_TEXT,
+    TYPE_INSERT, TYPE_LINE, TYPE_LWPOLYLINE, TYPE_MTEXT, TYPE_POINT, TYPE_SOLID, TYPE_SPLINE,
+    TYPE_TEXT,
 };
 pub use header::{
     read_header, FileHeader, HeaderError, HeaderR2000, HeaderR2004, SectionLocator,

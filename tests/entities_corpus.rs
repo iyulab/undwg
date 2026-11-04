@@ -108,8 +108,9 @@ fn every_real_line_circle_and_arc_reads() {
         mut attributes,
         mut mtexts,
         mut dimensions,
+        mut splines,
         mut failed,
-    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
+    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
     let mut named_blocks = 0usize;
     let mut references_checked = 0usize;
     for path in &files {
@@ -178,7 +179,7 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 1..=3 | 7 | 17..=19 | 20..=26 | 27 | 28 | 31 | 35 | 44 | 77)
+            if !matches!(frame.type_code, 1..=3 | 7 | 17..=19 | 20..=26 | 27 | 28 | 31 | 35 | 36 | 44 | 77)
             {
                 continue;
             }
@@ -409,6 +410,34 @@ fn every_real_line_circle_and_arc_reads() {
                         d.ordinate_flags.map_or(-1, i32::from)
                     )
                 }
+                Geometry::Spline(sp) => {
+                    splines += 1;
+                    assert!(
+                        sp.knots.iter().all(|k| k.is_finite())
+                            && sp.weights.iter().all(|k| k.is_finite())
+                            && sp.control_points.iter().all(|p| finite(p))
+                            && sp.fit_points.iter().all(|p| finite(p)),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    let flat = |v: &[[f64; 3]]| v.iter().flatten().copied().collect::<Vec<f64>>();
+                    let tangent = |t: Option<[f64; 3]>| t.map(|t| t.to_vec()).unwrap_or_default();
+                    // scenario, degree, closed, periodic, knots, weights, control points, fit points, start and end tangent
+                    format!(
+                        "SPLINE\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+                        if sp.fit_data { 2 } else { 1 },
+                        sp.degree,
+                        i32::from(sp.closed),
+                        i32::from(sp.periodic),
+                        sp.knots,
+                        sp.weights,
+                        flat(&sp.control_points),
+                        flat(&sp.fit_points),
+                        tangent(sp.start_tangent),
+                        tangent(sp.end_tangent)
+                    )
+                }
                 Geometry::Mtext(m) => {
                     mtexts += 1;
                     assert!(
@@ -517,7 +546,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions, {splines} splines read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");
