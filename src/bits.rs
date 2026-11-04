@@ -245,6 +245,31 @@ impl<'a> BitReader<'a> {
         Ok(f64::from_le_bytes(bytes))
     }
 
+    /// A 3D point of three bitdoubles (3BD).
+    pub fn point_3bd(&mut self) -> Result<[f64; 3], BitError> {
+        Ok([self.bit_double()?, self.bit_double()?, self.bit_double()?])
+    }
+
+    /// A bit thickness (R2000 and later): one bit, which when set means a
+    /// thickness of zero, otherwise a bitdouble follows.
+    pub fn bit_thickness(&mut self) -> Result<f64, BitError> {
+        if self.bit()? {
+            Ok(0.0)
+        } else {
+            self.bit_double()
+        }
+    }
+
+    /// A bit extrusion (R2000 and later): one bit, which when set means the
+    /// extrusion (0, 0, 1), otherwise three bitdoubles follow.
+    pub fn bit_extrusion(&mut self) -> Result<[f64; 3], BitError> {
+        if self.bit()? {
+            Ok([0.0, 0.0, 1.0])
+        } else {
+            self.point_3bd()
+        }
+    }
+
     /// A modular char (MC), unsigned: seven bits per byte, least significant
     /// group first, the top bit of a byte says another byte follows.
     pub fn modular_char(&mut self) -> Result<u64, BitError> {

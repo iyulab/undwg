@@ -21,6 +21,7 @@
 mod bits;
 mod checksum;
 mod classes;
+mod entities;
 mod header;
 mod lz;
 mod objects;
@@ -29,6 +30,10 @@ mod version;
 
 pub use bits::{BitError, BitReader, EndOfData, HandleRef};
 pub use classes::{read_classes, ClassDef, ClassError};
+pub use entities::{
+    read_entity, Arc, Circle, CommonEntity, Entity, Geometry, Line, TYPE_ARC, TYPE_CIRCLE,
+    TYPE_LINE,
+};
 pub use header::{
     read_header, FileHeader, HeaderError, HeaderR2000, HeaderR2004, SectionLocator,
     SECTION_PAGE_MAP_BIAS,

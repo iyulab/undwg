@@ -16,5 +16,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - A corpus test that reads the class definitions of every R2004-family file.
 - `read_object_map`, `read_object_frame`: the object map (checksummed blocks of handle and position increments) and the frame of each object -- its size, its type code and its checksum. An entry whose position lies outside the object data is left for the caller to see; an object whose checksum or size does not hold is an error, not a guess.
 - A corpus test over the object maps and object frames of real files.
+- `read_entity`: the common data every entity has (handle, extended data, graphic flag, colour, linetype scale, line weight, visibility) and the geometry of lines, circles and arcs. Any other kind of object is left alone. The object map and the frames now also check that the object found at a position states the handle the map gave it.
+- A corpus test that reads every line, circle and arc of real files.
 - `HeaderR2000::section`: the bytes of a section the R2000 locator list names. The class definitions, the object map and the object frames of R2000 files are read with the same readers as later versions, from those bytes and from the file itself.
 - A corpus test that reads the table of contents of every R2004-family file, checks every listed page, assembles every section, and checks that the header and class sections open with their documented sentinels.
