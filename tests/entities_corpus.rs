@@ -333,7 +333,7 @@ fn every_real_line_circle_and_arc_reads() {
                 continue;
             };
             if !is_hatch(frame.type_code)
-                && !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 40 | 41 | 44 | 46 | 77)
+                && !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 34 | 40 | 41 | 44 | 46 | 77)
             {
                 continue;
             }
@@ -898,6 +898,44 @@ fn every_real_line_circle_and_arc_reads() {
                     );
                     let flat: Vec<f64> = f.corners.iter().flatten().copied().collect();
                     format!("3DFACE\t{:?}\t{:?}", flat, f.invisible_edges)
+                }
+                Geometry::Viewport(v) => {
+                    assert!(
+                        finite(&v.center)
+                            && v.width.is_finite()
+                            && v.height.is_finite()
+                            && finite(&v.view_target)
+                            && finite(&v.view_direction)
+                            && v.view_twist.is_finite()
+                            && v.view_height.is_finite()
+                            && v.lens_length.is_finite()
+                            && finite(&v.view_center),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    let frozen: Vec<String> = v
+                        .frozen_layers
+                        .iter()
+                        .map(|h| {
+                            layers.get(h).map(|l| text_hex(&l.name)).unwrap_or_else(|| {
+                                panic!("{}: frozen layer {h:#x}", path.display())
+                            })
+                        })
+                        .collect();
+                    format!(
+                        "VIEWPORT\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{}\t{:?}",
+                        v.center,
+                        (v.width, v.height),
+                        v.view_center,
+                        v.view_height,
+                        v.view_target,
+                        v.view_direction,
+                        v.view_twist,
+                        v.lens_length,
+                        v.status_flags,
+                        frozen
+                    )
                 }
                 _ => continue,
             };

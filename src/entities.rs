@@ -80,6 +80,8 @@ pub const TYPE_3DFACE: u16 = 28;
 pub const TYPE_SOLID: u16 = 31;
 /// The type code of a lightweight polyline.
 pub const TYPE_LWPOLYLINE: u16 = 77;
+/// The type code of a viewport.
+pub const TYPE_VIEWPORT: u16 = 34;
 
 /// What every entity states about itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -764,6 +766,8 @@ pub enum Geometry {
     Solid(Solid),
     /// A 3D face.
     Face3d(Face3d),
+    /// A viewport.
+    Viewport(Viewport),
 }
 
 /// An entity: its common data and its geometry.
@@ -1919,6 +1923,7 @@ pub fn read_entity_with_classes(
                 | TYPE_ELLIPSE
                 | TYPE_SOLID
                 | TYPE_3DFACE
+                | TYPE_VIEWPORT
     ) {
         return Ok(None);
     }
@@ -1931,6 +1936,7 @@ pub fn read_entity_with_classes(
     let mut owned = 0;
     let mut boundary_counts: Vec<usize> = Vec::new();
     let mut registered_application = false;
+    let mut frozen_layer_count = 0usize;
     // From R2007 the text values of an entity are in its string stream.
     let mut strings = layout.strings.map(|(from, _)| {
         let mut s = r.clone();
@@ -2004,6 +2010,11 @@ pub fn read_entity_with_classes(
         TYPE_ELLIPSE => Geometry::Ellipse(read_ellipse(&mut r)?),
         TYPE_SOLID => Geometry::Solid(read_solid(&mut r)?),
         TYPE_3DFACE => Geometry::Face3d(read_face3d(&mut r)?),
+        TYPE_VIEWPORT => {
+            let (viewport, frozen) = read_viewport(&mut r, &mut strings, version)?;
+            frozen_layer_count = frozen;
+            Geometry::Viewport(viewport)
+        }
         _ => Geometry::Arc(read_arc(&mut r)?),
     };
     // The fields must fill the main stream exactly: a kind that stops short or
@@ -2069,6 +2080,28 @@ pub fn read_entity_with_classes(
     if let Geometry::Tolerance(t) = &mut geometry {
         t.style = h.handle()?.resolve(common.handle).filter(|&v| v != 0);
     }
+    if let Geometry::Viewport(v) = &mut geometry {
+        let mut next = || -> Result<Option<u64>, ObjectError> {
+            Ok(h.handle()?.resolve(common.handle).filter(|&x| x != 0))
+        };
+        for _ in 0..frozen_layer_count {
+            if let Some(layer) = next()? {
+                v.frozen_layers.push(layer);
+            }
+        }
+        v.clip_boundary = next()?;
+        if version == Version::R2000 {
+            next()?; // the viewport entity header
+        }
+        v.named_ucs = next()?;
+        v.base_ucs = next()?;
+        if version >= Version::R2007 {
+            next()?; // the background
+            next()?; // the visual style
+            next()?; // the shade plot object
+            next()?; // the sun
+        }
+    }
     if let Geometry::Dimension(d) = &mut geometry {
         // A null handle (zero) names nothing.
         let mut next = || -> Result<Option<u64>, ObjectError> {
@@ -2105,4 +2138,166 @@ pub fn read_entity_with_classes(
         geometry,
         references,
     }))
+}
+
+/// A viewport: a window in a paper-space layout onto a view of model space.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Viewport {
+    /// The centre of the window in paper space.
+    pub center: [f64; 3],
+    /// The width of the window.
+    pub width: f64,
+    /// The height of the window.
+    pub height: f64,
+    /// The point the view looks at.
+    pub view_target: [f64; 3],
+    /// The direction the view looks from.
+    pub view_direction: [f64; 3],
+    /// The twist of the view, in radians.
+    pub view_twist: f64,
+    /// The height of the view in model space units.
+    pub view_height: f64,
+    /// The lens length.
+    pub lens_length: f64,
+    /// The front clip plane distance.
+    pub front_clip: f64,
+    /// The back clip plane distance.
+    pub back_clip: f64,
+    /// The snap angle.
+    pub snap_angle: f64,
+    /// The centre of the view.
+    pub view_center: [f64; 2],
+    /// The snap base point.
+    pub snap_base: [f64; 2],
+    /// The snap spacing.
+    pub snap_spacing: [f64; 2],
+    /// The grid spacing.
+    pub grid_spacing: [f64; 2],
+    /// The circle zoom percent.
+    pub circle_zoom: i16,
+    /// How often the grid shows a major line (R2007 and later).
+    pub grid_major: Option<i16>,
+    /// The status flags: perspective `1`, front clip on `2`, back clip on `4`,
+    /// UCS follow `8`, front clip not at the eye `16`, UCS icon on `32`, icon
+    /// at the origin `64`, fast zoom `128`, snap `256`, grid `512`, turned off
+    /// `0x20000`, as stored.
+    pub status_flags: u32,
+    /// The name of the plot style sheet.
+    pub style_sheet: TextValue,
+    /// The render mode.
+    pub render_mode: u8,
+    /// The UCS is at the origin.
+    pub ucs_at_origin: bool,
+    /// The viewport has a UCS of its own.
+    pub ucs_per_viewport: bool,
+    /// The UCS origin.
+    pub ucs_origin: [f64; 3],
+    /// The UCS x axis.
+    pub ucs_x_axis: [f64; 3],
+    /// The UCS y axis.
+    pub ucs_y_axis: [f64; 3],
+    /// The UCS elevation.
+    pub ucs_elevation: f64,
+    /// The orthographic type of the UCS.
+    pub ucs_ortho_type: i16,
+    /// The shade plot mode (R2004 and later).
+    pub shade_plot_mode: Option<i16>,
+    /// The layers frozen in this viewport.
+    pub frozen_layers: Vec<u64>,
+    /// The clip boundary entity, when the window is not rectangular.
+    pub clip_boundary: Option<u64>,
+    /// The named UCS.
+    pub named_ucs: Option<u64>,
+    /// The base UCS.
+    pub base_ucs: Option<u64>,
+}
+
+/// Reads a viewport and the number of layers it freezes (their handles are in
+/// the handle stream).
+fn read_viewport(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+) -> Result<(Viewport, usize), BitError> {
+    let center = r.point_3bd()?;
+    let width = r.bit_double()?;
+    let height = r.bit_double()?;
+    let view_target = r.point_3bd()?;
+    let view_direction = r.point_3bd()?;
+    let view_twist = r.bit_double()?;
+    let view_height = r.bit_double()?;
+    let lens_length = r.bit_double()?;
+    let front_clip = r.bit_double()?;
+    let back_clip = r.bit_double()?;
+    let snap_angle = r.bit_double()?;
+    let view_center = [r.raw_double()?, r.raw_double()?];
+    let snap_base = [r.raw_double()?, r.raw_double()?];
+    let snap_spacing = [r.raw_double()?, r.raw_double()?];
+    let grid_spacing = [r.raw_double()?, r.raw_double()?];
+    let circle_zoom = r.bit_short()?;
+    let grid_major = if version >= Version::R2007 {
+        Some(r.bit_short()?)
+    } else {
+        None
+    };
+    let frozen = bounded_count(r, "frozen layer count")?;
+    let status_flags = r.bit_long()? as u32;
+    let style_sheet = text_value(r, strings)?;
+    let render_mode = r.raw_char()?;
+    let ucs_at_origin = r.bit()?;
+    let ucs_per_viewport = r.bit()?;
+    let ucs_origin = r.point_3bd()?;
+    let ucs_x_axis = r.point_3bd()?;
+    let ucs_y_axis = r.point_3bd()?;
+    let ucs_elevation = r.bit_double()?;
+    let ucs_ortho_type = r.bit_short()?;
+    let shade_plot_mode = if version >= Version::R2004 {
+        Some(r.bit_short()?)
+    } else {
+        None
+    };
+    if version >= Version::R2007 {
+        r.bit()?; // default lighting is used
+        r.raw_char()?; // the default lighting type
+        r.bit_double()?; // the brightness
+        r.bit_double()?; // the contrast
+        skip_color(r, strings)?; // the ambient light colour
+    }
+    Ok((
+        Viewport {
+            center,
+            width,
+            height,
+            view_target,
+            view_direction,
+            view_twist,
+            view_height,
+            lens_length,
+            front_clip,
+            back_clip,
+            snap_angle,
+            view_center,
+            snap_base,
+            snap_spacing,
+            grid_spacing,
+            circle_zoom,
+            grid_major,
+            status_flags,
+            style_sheet,
+            render_mode,
+            ucs_at_origin,
+            ucs_per_viewport,
+            ucs_origin,
+            ucs_x_axis,
+            ucs_y_axis,
+            ucs_elevation,
+            ucs_ortho_type,
+            shade_plot_mode,
+            frozen_layers: Vec::new(),
+            clip_boundary: None,
+            named_ucs: None,
+            base_ucs: None,
+        },
+        frozen,
+    ))
 }

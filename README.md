@@ -34,6 +34,7 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | Solids (2D filled areas) and 3D faces: corners, extrusion, invisible edges (R2000, R2004 and later) | done |
 | Layers: name, flags, colour, linetype (R2000, R2004 and later); the colour, linetype, scale, visibility and line weight every entity states | done |
 | Block headers: name, base point, external reference (R2000, R2004 and later) | done |
+| Viewports: window, view, frozen layers (R2000, R2004 and later) | done |
 | Other entities, other tables, header variables | planned |
 
 Files older than R2000 are an explicit error that names the version bytes it found. Writing DWG is out of scope.
