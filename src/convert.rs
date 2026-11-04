@@ -14,13 +14,13 @@ use uncad_model::model::{
     ArcEntity, AttdefEntity, AttribEntity, AttributeFlags, CircleEntity, Confidence,
     DimensionEntity, DimensionKind as ModelDimensionKind, DimensionPoints, EllipseEntity,
     EntityCommon, EntityId, EntityLinetype, Face3DEntity, HatchBoundaryPath,
-    HatchEdge as ModelHatchEdge, HatchEntity, HatchPatternLine, HatchStyle,
-    HorizontalJustification, ImageEntity, InsertEntity, LeaderAnnotation, LeaderEntity, LeaderPath,
-    LineEntity, LwPolylineEntity, MLineEntity, MLineVertex, MTextAttachment, MTextEntity,
-    OrdinateAxis, Origin, OverrideValue, Point2D, Point3D, PointEntity, PolylineEntity,
-    PolylineVertex, RayEntity, Ref, SolidEntity, SplineEntity, StyleOverride, TextEntity,
-    TextOverride, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
-    WipeoutEntity,
+    HatchEdge as ModelHatchEdge, HatchEntity, HatchGradient as ModelHatchGradient,
+    HatchPatternLine, HatchStyle, HorizontalJustification, ImageEntity, InsertEntity,
+    LeaderAnnotation, LeaderEntity, LeaderPath, LineEntity, LwPolylineEntity, MLineEntity,
+    MLineVertex, MTextAttachment, MTextEntity, OrdinateAxis, Origin, OverrideValue, Point2D,
+    Point3D, PointEntity, PolylineEntity, PolylineVertex, RayEntity, Ref, SolidEntity,
+    SplineEntity, StyleOverride, TextEntity, TextOverride, ToleranceEntity, VerticalJustification,
+    ViewportEntity, ViewportView, WipeoutEntity,
 };
 use uncad_model::tables::{
     AngularUnitFormat, ArcSymbol, BlockRecord, DimStyleRecord, ExternalReference, FractionFormat,
@@ -1356,16 +1356,23 @@ fn convert_entity(
             })
         }
         Geometry::Hatch(h) => {
-            // A gradient fill carries colours this reader does not read yet.
-            if h.gradient {
-                notes.add("hatch with a gradient fill entity not converted");
-                return None;
-            }
+            let gradient = match &h.gradient {
+                None => None,
+                Some(g) => match hatch_gradient(g) {
+                    Some(g) => Some(g),
+                    None => {
+                        notes.add(
+                            "hatch with a gradient that states no colour entity not converted",
+                        );
+                        return None;
+                    }
+                },
+            };
             Entity::Hatch(HatchEntity {
                 common,
                 boundary_paths: h.paths.iter().map(hatch_path).collect(),
                 solid_fill: h.solid_fill,
-                gradient: None,
+                gradient,
                 pattern_lines: h
                     .pattern_lines
                     .iter()
@@ -1447,6 +1454,44 @@ fn image_boundary(i: &entities::Image) -> Vec<Point2D> {
         (_, points) => points.to_vec(),
     };
     corners.into_iter().map(to_world).collect()
+}
+
+/// A gradient fill in the model's words, or `None` when the file states no colour.
+///
+/// A colour long names a palette colour (`0xC3`) or is a 24-bit RGB value; a
+/// single-colour gradient fades its colour by the tint, and a two-colour one runs
+/// from the first stop to the last.
+fn hatch_gradient(g: &entities::HatchGradient) -> Option<ModelHatchGradient> {
+    let rgb = |packed: u32| -> Option<u32> {
+        if packed >> 24 == 0xC3 {
+            uncad_model::color::aci_to_rgb((packed & 0xFFFF) as u16)
+        } else {
+            Some(packed & 0xFF_FFFF)
+        }
+    };
+    let mut stops: Vec<(f64, u32)> = g
+        .colors
+        .iter()
+        .filter_map(|(p, c)| rgb(*c).map(|c| (*p, c)))
+        .collect();
+    let (color1, color2, tint) = if g.single_color {
+        let (_, c) = *stops.first()?;
+        (c, None, g.tint)
+    } else if stops.len() >= 2 {
+        stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+        (stops[0].1, Some(stops[stops.len() - 1].1), 0.0)
+    } else {
+        let (_, c) = *stops.first()?;
+        (c, Some(c), 0.0)
+    };
+    let name = characters(&g.name).map(|n| n.to_ascii_uppercase());
+    Some(ModelHatchGradient {
+        is_radial: matches!(name.as_deref(), Some("SPHERICAL" | "HEMISPHERICAL")),
+        angle: g.angle,
+        color1,
+        color2,
+        tint,
+    })
 }
 
 /// A hatch boundary in the model's words.

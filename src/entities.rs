@@ -340,6 +340,25 @@ pub struct HatchPatternLine {
     pub dashes: Vec<f64>,
 }
 
+/// A gradient fill: colours blended across the area.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HatchGradient {
+    /// The angle of the gradient, in radians.
+    pub angle: f64,
+    /// The shift of the gradient (`0` to `1`).
+    pub shift: f64,
+    /// Whether the gradient fades one colour toward white.
+    pub single_color: bool,
+    /// How far a single-colour gradient fades (`0` to `1`).
+    pub tint: f64,
+    /// The colour stops: the position along the gradient and the colour long
+    /// the file stores (the way in the top byte -- `0xC3` a colour number in
+    /// the low byte, anything else a 24-bit RGB value in the rest).
+    pub colors: Vec<(f64, u32)>,
+    /// The name of the gradient (`LINEAR`, `SPHERICAL`, ...).
+    pub name: TextValue,
+}
+
 /// A hatch: an area filled with a pattern or a colour.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hatch {
@@ -353,8 +372,8 @@ pub struct Hatch {
     pub solid_fill: bool,
     /// Whether the hatch follows the objects of its boundary.
     pub associative: bool,
-    /// Whether the fill is a gradient (R2004 and later).
-    pub gradient: bool,
+    /// The gradient the area is filled with (R2004 and later), when it is one.
+    pub gradient: Option<HatchGradient>,
     /// The boundaries.
     pub paths: Vec<HatchPath>,
     /// The style: odd parity `0`, outermost `1`, whole area `2`.
@@ -1160,22 +1179,34 @@ fn read_hatch(
     strings: &mut Option<BitReader<'_>>,
     version: Version,
 ) -> Result<(Hatch, Vec<usize>), BitError> {
-    let mut gradient = false;
+    let mut gradient = None;
     if version >= Version::R2004 {
-        gradient = r.bit_long()? != 0;
+        let is_gradient = r.bit_long()? != 0;
         r.bit_long()?; // reserved
-        r.bit_double()?; // gradient angle
-        r.bit_double()?; // gradient shift
-        r.bit_long()?; // single colour gradient
-        r.bit_double()?; // gradient tint
-        let colors = bounded_count(r, "gradient colour count")?;
-        for _ in 0..colors {
-            r.bit_double()?;
-            r.bit_short()?;
-            r.bit_long()?;
-            r.raw_char()?;
+        let angle = r.bit_double()?;
+        let shift = r.bit_double()?;
+        let single_color = r.bit_long()? != 0;
+        let tint = r.bit_double()?;
+        let count = bounded_count(r, "gradient colour count")?;
+        let mut colors = Vec::with_capacity(count);
+        for _ in 0..count {
+            let position = r.bit_double()?;
+            r.bit_short()?; // not understood
+            let color = r.bit_long()? as u32;
+            r.raw_char()?; // the colour's flags, which the long already carries
+            colors.push((position, color));
         }
-        text_value(r, strings)?; // the gradient name
+        let gradient_name = text_value(r, strings)?;
+        if is_gradient {
+            gradient = Some(HatchGradient {
+                angle,
+                shift,
+                single_color,
+                tint,
+                colors,
+                name: gradient_name,
+            });
+        }
     }
     let elevation = r.bit_double()?;
     let extrusion = r.point_3bd()?;
