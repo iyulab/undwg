@@ -4,7 +4,7 @@
 //! a flag for a stored graphic, colour, linetype scale and so on -- and then
 //! the fields of its own kind. This module reads the common data and the
 //! simplest kinds: lines, circles, arcs, points, ellipses, lightweight
-//! polylines and block insertions. Any other kind is left
+//! polylines, block insertions, solids and 3D faces. Any other kind is left
 //! alone (`Ok(None)`), never guessed at.
 //!
 //! Only the main bit stream is read; the strings and handle references that
@@ -26,6 +26,10 @@ pub const TYPE_POINT: u16 = 27;
 pub const TYPE_INSERT: u16 = 7;
 /// The type code of an ellipse.
 pub const TYPE_ELLIPSE: u16 = 35;
+/// The type code of a 3D face.
+pub const TYPE_3DFACE: u16 = 28;
+/// The type code of a solid.
+pub const TYPE_SOLID: u16 = 31;
 /// The type code of a lightweight polyline.
 pub const TYPE_LWPOLYLINE: u16 = 77;
 
@@ -107,6 +111,30 @@ pub struct Point {
     pub extrusion: [f64; 3],
     /// The angle of the x axis, in radians.
     pub x_axis_angle: f64,
+}
+
+/// A flat filled area of three or four corners (a 2D solid).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Solid {
+    /// The thickness.
+    pub thickness: f64,
+    /// The z of every corner.
+    pub elevation: f64,
+    /// The four corners in the plane (the third and fourth are the same for
+    /// a triangle).
+    pub corners: [[f64; 2]; 4],
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+}
+
+/// A 3D face of three or four corners.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Face3d {
+    /// The four corners (the fourth is the third for a triangle).
+    pub corners: [[f64; 3]; 4],
+    /// Which edges are invisible (bit 0 the first edge, up to bit 3); `0`
+    /// when the face states none.
+    pub invisible_edges: i16,
 }
 
 /// An ellipse or an elliptical arc. The centre and the major axis vector are
@@ -196,6 +224,10 @@ pub enum Geometry {
     Insert(Insert),
     /// An ellipse.
     Ellipse(Ellipse),
+    /// A flat filled area.
+    Solid(Solid),
+    /// A 3D face.
+    Face3d(Face3d),
 }
 
 /// An entity: its common data and its geometry.
@@ -423,6 +455,46 @@ fn read_lwpolyline(r: &mut BitReader<'_>, version: Version) -> Result<LwPolyline
     })
 }
 
+fn read_solid(r: &mut BitReader<'_>) -> Result<Solid, BitError> {
+    let thickness = r.bit_thickness()?;
+    let elevation = r.bit_double()?;
+    let mut corners = [[0.0; 2]; 4];
+    for corner in &mut corners {
+        *corner = [r.raw_double()?, r.raw_double()?];
+    }
+    Ok(Solid {
+        thickness,
+        elevation,
+        corners,
+        extrusion: r.bit_extrusion()?,
+    })
+}
+
+fn read_face3d(r: &mut BitReader<'_>) -> Result<Face3d, BitError> {
+    let no_flags = r.bit()?;
+    let z_is_zero = r.bit()?;
+    let first = [
+        r.raw_double()?,
+        r.raw_double()?,
+        if z_is_zero { 0.0 } else { r.raw_double()? },
+    ];
+    // Each later corner is three difference-coded doubles against the one before.
+    let mut corners = [first; 4];
+    for i in 1..4 {
+        let previous = corners[i - 1];
+        corners[i] = [
+            r.bit_double_with_default(previous[0])?,
+            r.bit_double_with_default(previous[1])?,
+            r.bit_double_with_default(previous[2])?,
+        ];
+    }
+    let invisible_edges = if no_flags { 0 } else { r.bit_short()? };
+    Ok(Face3d {
+        corners,
+        invisible_edges,
+    })
+}
+
 fn read_ellipse(r: &mut BitReader<'_>) -> Result<Ellipse, BitError> {
     Ok(Ellipse {
         center: r.point_3bd()?,
@@ -498,6 +570,8 @@ pub fn read_entity(
             | TYPE_LWPOLYLINE
             | TYPE_INSERT
             | TYPE_ELLIPSE
+            | TYPE_SOLID
+            | TYPE_3DFACE
     ) {
         return Ok(None);
     }
@@ -514,6 +588,8 @@ pub fn read_entity(
         TYPE_LWPOLYLINE => Geometry::LwPolyline(read_lwpolyline(&mut r, version)?),
         TYPE_INSERT => Geometry::Insert(read_insert(&mut r)?),
         TYPE_ELLIPSE => Geometry::Ellipse(read_ellipse(&mut r)?),
+        TYPE_SOLID => Geometry::Solid(read_solid(&mut r)?),
+        TYPE_3DFACE => Geometry::Face3d(read_face3d(&mut r)?),
         _ => Geometry::Arc(read_arc(&mut r)?),
     };
     Ok(Some(Entity { common, geometry }))
