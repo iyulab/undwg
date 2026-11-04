@@ -47,6 +47,11 @@ pub enum BitError {
     },
     /// A text holds characters that spell nothing (an unpaired surrogate).
     BadText,
+    /// The data uses a form this reader does not read.
+    Unsupported {
+        /// What it is.
+        form: &'static str,
+    },
 }
 
 impl fmt::Display for BitError {
@@ -58,6 +63,7 @@ impl fmt::Display for BitError {
             }
             BitError::TooLong { form } => write!(f, "a {form} is longer than its integer"),
             BitError::BadText => write!(f, "a text holds characters that spell nothing"),
+            BitError::Unsupported { form } => write!(f, "{form} is not read by this version"),
         }
     }
 }

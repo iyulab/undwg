@@ -52,6 +52,28 @@ fn dwg_files(dir: &Path, into: &mut Vec<PathBuf>) {
     }
 }
 
+/// The fields of a text as the dump writes them: elevation, insertion,
+/// alignment flag and point, extrusion, oblique, rotation, height, width
+/// factor, (horizontal, vertical), generation, text.
+fn text_fields(t: &undwg::Text) -> String {
+    let a = t.alignment.unwrap_or([0.0, 0.0]);
+    format!(
+        "{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+        t.elevation,
+        t.insertion,
+        i32::from(t.alignment.is_some()),
+        a,
+        t.extrusion,
+        t.oblique,
+        t.rotation,
+        t.height,
+        t.width_factor,
+        (t.horizontal, t.vertical),
+        t.generation,
+        text_hex(&t.value)
+    )
+}
+
 fn finite(values: &[f64]) -> bool {
     values.iter().all(|v| v.is_finite())
 }
@@ -83,8 +105,9 @@ fn every_real_line_circle_and_arc_reads() {
         mut solids,
         mut faces,
         mut texts,
+        mut attributes,
         mut failed,
-    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
+    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
     let mut named_blocks = 0usize;
     let mut references_checked = 0usize;
     for path in &files {
@@ -143,7 +166,7 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 1 | 7 | 17..=19 | 27 | 28 | 31 | 35 | 77) {
+            if !matches!(frame.type_code, 1..=3 | 7 | 17..=19 | 27 | 28 | 31 | 35 | 77) {
                 continue;
             }
             let entity = match read_entity(&objects, *entry, version) {
@@ -179,7 +202,13 @@ fn every_real_line_circle_and_arc_reads() {
             };
             expect(refs.layer, 51, "layer");
             if let Some(owner) = refs.owner {
-                expect(owner, 49, "owner");
+                // An attribute belongs to the insertion it follows.
+                let kind = if matches!(entity.geometry, Geometry::Attrib(_)) {
+                    7
+                } else {
+                    49
+                };
+                expect(owner, kind, "owner");
             }
             if let Some(x) = refs.xdictionary {
                 expect(x, 42, "extension dictionary");
@@ -198,6 +227,9 @@ fn every_real_line_circle_and_arc_reads() {
             }
             if let Geometry::Text(t) = &entity.geometry {
                 expect(t.style, 53, "text style");
+            }
+            if let Geometry::Attrib(a) | Geometry::Attdef(a) = &entity.geometry {
+                expect(a.text.style, 53, "attribute text style");
             }
             references_checked += 1;
             let name = match &entity.geometry {
@@ -315,23 +347,28 @@ fn every_real_line_circle_and_arc_reads() {
                         path.display(),
                         entry.handle
                     );
-                    // elevation, insertion, alignment flag and point, extrusion,
-                    // oblique, rotation, height, width factor, horizontal, vertical, text
-                    let a = t.alignment.unwrap_or([0.0, 0.0]);
+                    format!("TEXT\t{}", text_fields(t))
+                }
+                Geometry::Attrib(a) | Geometry::Attdef(a) => {
+                    attributes += 1;
+                    assert!(
+                        a.text.elevation.is_finite()
+                            && finite(&a.text.insertion)
+                            && a.text.height.is_finite(),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    let (kind, prompt) = match &entity.geometry {
+                        Geometry::Attdef(_) => ("ATTDEF", a.prompt.as_ref().map(text_hex)),
+                        _ => ("ATTRIB", None),
+                    };
                     format!(
-                        "TEXT\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
-                        t.elevation,
-                        t.insertion,
-                        i32::from(t.alignment.is_some()),
-                        a,
-                        t.extrusion,
-                        t.oblique,
-                        t.rotation,
-                        t.height,
-                        t.width_factor,
-                        (t.horizontal, t.vertical),
-                        t.generation,
-                        text_hex(&t.value)
+                        "{kind}\t{}\t{:?}\t{:?}\t{:?}",
+                        text_fields(&a.text),
+                        text_hex(&a.tag),
+                        a.flags,
+                        prompt.unwrap_or_default()
                     )
                 }
                 Geometry::Ellipse(e) => {
@@ -390,7 +427,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");

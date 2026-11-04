@@ -27,6 +27,10 @@ pub const TYPE_LINE: u16 = 19;
 pub const TYPE_POINT: u16 = 27;
 /// The type code of a text.
 pub const TYPE_TEXT: u16 = 1;
+/// The type code of an attribute.
+pub const TYPE_ATTRIB: u16 = 2;
+/// The type code of an attribute definition.
+pub const TYPE_ATTDEF: u16 = 3;
 /// The type code of a block insertion.
 pub const TYPE_INSERT: u16 = 7;
 /// The type code of an ellipse.
@@ -194,6 +198,22 @@ pub struct Text {
     pub style: u64,
 }
 
+/// An attribute (a text that belongs to a block insertion) or an attribute
+/// definition (the template of one, inside a block definition): a text with a tag.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attribute {
+    /// The text. For a definition its value is the default value.
+    pub text: Text,
+    /// The tag that names the attribute.
+    pub tag: TextValue,
+    /// The flags: bit 0 invisible, bit 1 constant, bit 2 verify, bit 3 preset.
+    pub flags: u8,
+    /// Whether the position is locked (R2010 and later).
+    pub position_locked: bool,
+    /// The prompt, which only a definition has.
+    pub prompt: Option<TextValue>,
+}
+
 /// A block insertion. The block it inserts is named by a handle in the
 /// object's handle stream, which this reader does not read.
 #[derive(Debug, Clone, PartialEq)]
@@ -302,6 +322,10 @@ pub enum Geometry {
     Insert(Insert),
     /// A line of text.
     Text(Text),
+    /// An attribute of a block insertion.
+    Attrib(Attribute),
+    /// An attribute definition.
+    Attdef(Attribute),
     /// An ellipse.
     Ellipse(Ellipse),
     /// A flat filled area.
@@ -648,9 +672,73 @@ fn read_ellipse(r: &mut BitReader<'_>) -> Result<Ellipse, BitError> {
     })
 }
 
+/// A text value from where the version keeps it: the string stream from R2010,
+/// the main stream before.
+fn text_value(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+) -> Result<TextValue, BitError> {
+    match strings {
+        Some(s) => s.text(true),
+        None => r.text(false),
+    }
+}
+
+/// Reads an attribute or an attribute definition: a text, then the tag, the
+/// flags and, for a definition, the prompt.
+///
+/// From R2010 a byte follows the text (the version of the form; R2018 adds the
+/// attribute type next), and a definition has one more byte after the lock
+/// flag. Their layout is what real files show: the main stream ends exactly
+/// where it should with them, and not without.
+fn read_attribute(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+    definition: bool,
+) -> Result<Attribute, BitError> {
+    let text = read_text(r, strings)?;
+    if version >= Version::R2010 {
+        r.raw_char()?;
+    }
+    let mut attribute_type = 1;
+    if version >= Version::R2018 {
+        attribute_type = r.raw_char()?;
+    }
+    let tag = text_value(r, strings)?;
+    r.bit_short()?; // the field length, unused
+    let flags = r.raw_char()?;
+    let position_locked = if version >= Version::R2010 {
+        r.bit()?
+    } else {
+        false
+    };
+    if definition && version >= Version::R2010 {
+        r.raw_char()?;
+    }
+    let prompt = if definition {
+        Some(text_value(r, strings)?)
+    } else {
+        None
+    };
+    if attribute_type != 1 {
+        // Anything but a single line of text carries an embedded multiline text.
+        return Err(BitError::Unsupported {
+            form: "a multiline attribute",
+        });
+    }
+    Ok(Attribute {
+        text,
+        tag,
+        flags,
+        position_locked,
+        prompt,
+    })
+}
+
 /// Reads a line of text. Its text value is in the string stream from R2007
 /// and in the main stream before; `strings` is that stream when there is one.
-fn read_text(r: &mut BitReader<'_>, strings: Option<&mut BitReader<'_>>) -> Result<Text, BitError> {
+fn read_text(r: &mut BitReader<'_>, strings: &mut Option<BitReader<'_>>) -> Result<Text, BitError> {
     let flags = r.raw_char()?;
     let elevation = if flags & 1 == 0 { r.raw_double()? } else { 0.0 };
     let insertion = [r.raw_double()?, r.raw_double()?];
@@ -672,10 +760,7 @@ fn read_text(r: &mut BitReader<'_>, strings: Option<&mut BitReader<'_>>) -> Resu
     } else {
         1.0
     };
-    let value = match strings {
-        Some(s) => s.text(true)?,
-        None => r.text(false)?,
-    };
+    let value = text_value(r, strings)?;
     let generation = if flags & 0x20 == 0 { r.bit_short()? } else { 0 };
     let horizontal = if flags & 0x40 == 0 { r.bit_short()? } else { 0 };
     let vertical = if flags & 0x80 == 0 { r.bit_short()? } else { 0 };
@@ -777,6 +862,8 @@ pub fn read_entity(
             | TYPE_LWPOLYLINE
             | TYPE_INSERT
             | TYPE_TEXT
+            | TYPE_ATTRIB
+            | TYPE_ATTDEF
             | TYPE_ELLIPSE
             | TYPE_SOLID
             | TYPE_3DFACE
@@ -806,7 +893,9 @@ pub fn read_entity(
             owned = count;
             Geometry::Insert(insert)
         }
-        TYPE_TEXT => Geometry::Text(read_text(&mut r, strings.as_mut())?),
+        TYPE_TEXT => Geometry::Text(read_text(&mut r, &mut strings)?),
+        TYPE_ATTRIB => Geometry::Attrib(read_attribute(&mut r, &mut strings, version, false)?),
+        TYPE_ATTDEF => Geometry::Attdef(read_attribute(&mut r, &mut strings, version, true)?),
         TYPE_ELLIPSE => Geometry::Ellipse(read_ellipse(&mut r)?),
         TYPE_SOLID => Geometry::Solid(read_solid(&mut r)?),
         TYPE_3DFACE => Geometry::Face3d(read_face3d(&mut r)?),
@@ -830,7 +919,12 @@ pub fn read_entity(
     let mut h = r.clone();
     h.seek(layout.handle_start);
     let references = read_references(&mut h, &common, flags)?;
-    if let Geometry::Text(text) = &mut geometry {
+    let text = match &mut geometry {
+        Geometry::Text(t) => Some(t),
+        Geometry::Attrib(a) | Geometry::Attdef(a) => Some(&mut a.text),
+        _ => None,
+    };
+    if let Some(text) = text {
         text.style = h
             .handle()?
             .resolve(common.handle)
