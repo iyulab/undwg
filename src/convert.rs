@@ -11,17 +11,21 @@ use std::fmt;
 
 use uncad_model::color::ACI_PALETTE;
 use uncad_model::model::{
-    ArcEntity, CircleEntity, Confidence, EntityCommon, EntityId, EntityLinetype, LineEntity,
-    Origin, Point3D, PointEntity, Ref,
+    ArcEntity, CircleEntity, Confidence, EllipseEntity, EntityCommon, EntityId, EntityLinetype,
+    Face3DEntity, HorizontalJustification, LineEntity, LwPolylineEntity, Origin, Point2D, Point3D,
+    PointEntity, PolylineVertex, RayEntity, Ref, SolidEntity, TextEntity, VerticalJustification,
 };
 use uncad_model::tables::{BlockRecord, ExternalReference, LayerRecord, Tables};
+use uncad_model::text::decode_escapes;
 use uncad_model::{CadDatabase, Entity, HeaderVariables as ModelHeader, ReadDiagnostics};
 
 use crate::bits::TextValue;
 use crate::drawing::{Drawing, DrawingError};
 use crate::entities::{self, read_entity_links, read_entity_with_classes, Geometry};
 use crate::objects::ObjectEntry;
-use crate::tables::{read_block_header, read_layer, read_linetype_name, BlockHeader, Layer};
+use crate::tables::{
+    read_block_header, read_layer, read_linetype_name, read_style_name, BlockHeader, Layer,
+};
 use crate::version::Version;
 
 /// Why a drawing could not be read at all.
@@ -89,11 +93,15 @@ impl Notes {
 /// A text as characters. A text in a code page other than ASCII cannot be
 /// turned into characters without knowing the page, so it is not guessed.
 fn characters(t: &TextValue) -> Option<String> {
-    match t {
-        TextValue::Unicode(s) => Some(s.clone()),
-        TextValue::Ansi(b) if b.is_ascii() => Some(String::from_utf8_lossy(b).into_owned()),
-        TextValue::Ansi(_) => None,
-    }
+    let stored = match t {
+        TextValue::Unicode(s) => s.clone(),
+        TextValue::Ansi(b) if b.is_ascii() => String::from_utf8_lossy(b).into_owned(),
+        TextValue::Ansi(_) => return None,
+    };
+    // A file stores the characters its code page lacks as `\U+XXXX`; the model's
+    // strings do not depend on how a file stored them. (`\M+` names a character
+    // of an Asian code page, which this reader cannot decode: it stays as written.)
+    Some(decode_escapes(&stored, |_, _| None).into_owned())
 }
 
 fn hex(handle: u64) -> String {
@@ -129,6 +137,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     // The tables the entities refer to by handle.
     let mut layers: BTreeMap<u64, Layer> = BTreeMap::new();
     let mut linetypes: BTreeMap<u64, TextValue> = BTreeMap::new();
+    let mut styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut headers: Vec<BlockHeader> = Vec::new();
     for e in &entries {
         match read_layer(objects, *e, version) {
@@ -150,6 +159,17 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             Ok(None) => {}
             Err(_) => {
                 notes.add("linetype that could not be read");
+                continue;
+            }
+        }
+        match read_style_name(objects, *e, version) {
+            Ok(Some(name)) => {
+                styles.insert(e.handle, name);
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                notes.add("text style that could not be read");
                 continue;
             }
         }
@@ -259,7 +279,13 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             }
             continue;
         };
-        let Some(entity) = convert_entity(&entity, version, &layer_names, &linetypes) else {
+        let ctx = Context {
+            version,
+            layers: &layer_names,
+            linetypes: &linetypes,
+            styles: &styles,
+        };
+        let Some(entity) = convert_entity(&entity, &ctx, &mut notes) else {
             let kind = format!("{:?}", entity.geometry);
             let kind = kind.split(['(', ' ', '{']).next().unwrap_or("").to_string();
             notes.add(format!("{kind} entity not converted"));
@@ -406,15 +432,26 @@ fn chain(
     order
 }
 
+/// What converting an entity needs to know about the rest of the drawing.
+struct Context<'a> {
+    version: Version,
+    layers: &'a BTreeMap<u64, String>,
+    linetypes: &'a BTreeMap<u64, TextValue>,
+    styles: &'a BTreeMap<u64, TextValue>,
+}
+
+fn point2(p: [f64; 2]) -> Point2D {
+    Point2D { x: p[0], y: p[1] }
+}
+
 /// The model entity for `entity`, or `None` for a kind this reader does not
-/// convert yet.
+/// convert yet (or a text it cannot turn into characters, which is reported).
 fn convert_entity(
     entity: &entities::Entity,
-    version: Version,
-    layers: &BTreeMap<u64, String>,
-    linetypes: &BTreeMap<u64, TextValue>,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
 ) -> Option<Entity> {
-    let common = convert_common(entity, version, layers, linetypes);
+    let common = convert_common(entity, ctx);
     Some(match &entity.geometry {
         Geometry::Line(l) => Entity::Line(LineEntity {
             common,
@@ -439,17 +476,113 @@ fn convert_entity(
             common,
             position: point(p.position),
         }),
+        Geometry::LwPolyline(p) => Entity::LwPolyline(LwPolylineEntity {
+            common,
+            vertices: p
+                .vertices
+                .iter()
+                .map(|v| PolylineVertex {
+                    point: point2(v.point),
+                    bulge: v.bulge,
+                    start_width: v.start_width,
+                    end_width: v.end_width,
+                })
+                .collect(),
+            closed: p.closed,
+            const_width: p.const_width,
+            elevation: p.elevation,
+            extrusion: point(p.normal),
+        }),
+        Geometry::Solid(s) | Geometry::Trace(s) => {
+            let solid = SolidEntity {
+                common,
+                corner1: point2(s.corners[0]),
+                corner2: point2(s.corners[1]),
+                corner3: point2(s.corners[2]),
+                corner4: point2(s.corners[3]),
+                elevation: s.elevation,
+                extrusion: point(s.extrusion),
+            };
+            if matches!(entity.geometry, Geometry::Trace(_)) {
+                Entity::Trace(solid)
+            } else {
+                Entity::Solid(solid)
+            }
+        }
+        Geometry::Ray(r) => Entity::Ray(RayEntity {
+            common,
+            point: point(r.point),
+            vector: point(r.vector),
+        }),
+        Geometry::Xline(r) => Entity::XLine(RayEntity {
+            common,
+            point: point(r.point),
+            vector: point(r.vector),
+        }),
+        Geometry::Ellipse(e) => Entity::Ellipse(EllipseEntity {
+            common,
+            center: point(e.center),
+            major_axis_endpoint: point(e.major_axis),
+            axis_ratio: e.axis_ratio,
+            start_angle: e.start_angle,
+            end_angle: e.end_angle,
+            extrusion: point(e.extrusion),
+        }),
+        Geometry::Face3d(f) => Entity::Face3D(Face3DEntity {
+            common,
+            corner1: point(f.corners[0]),
+            corner2: point(f.corners[1]),
+            corner3: point(f.corners[2]),
+            corner4: point(f.corners[3]),
+            invisible_edges: Face3DEntity::invisible_edges_from_bits(f.invisible_edges as u32),
+        }),
+        Geometry::Text(t) => {
+            let Some(text) = characters(&t.value) else {
+                notes.add("text in a code page that is not read");
+                return None;
+            };
+            let style_name = match ctx.styles.get(&t.style) {
+                None => Ref::Unresolved(hex(t.style)),
+                Some(n) => match characters(n) {
+                    Some(n) => Ref::Resolved(n),
+                    None => Ref::Unresolved(hex(t.style)),
+                },
+            };
+            Entity::Text(TextEntity {
+                common,
+                start_point: point2(t.insertion),
+                text_height: t.height,
+                text,
+                rotation: t.rotation,
+                horizontal_justification: match t.horizontal {
+                    1 => HorizontalJustification::Center,
+                    2 => HorizontalJustification::Right,
+                    3 => HorizontalJustification::Aligned,
+                    4 => HorizontalJustification::Middle,
+                    5 => HorizontalJustification::Fit,
+                    _ => HorizontalJustification::Left,
+                },
+                vertical_justification: match t.vertical {
+                    1 => VerticalJustification::Bottom,
+                    2 => VerticalJustification::Middle,
+                    3 => VerticalJustification::Top,
+                    _ => VerticalJustification::Baseline,
+                },
+                alignment_point: t.alignment.map(point2),
+                width_factor: t.width_factor,
+                oblique_angle: t.oblique,
+                style_name,
+                elevation: t.elevation,
+                extrusion: point(t.extrusion),
+            })
+        }
         _ => return None,
     })
 }
 
 /// What every entity states, in the model's words.
-fn convert_common(
-    entity: &entities::Entity,
-    version: Version,
-    layers: &BTreeMap<u64, String>,
-    linetypes: &BTreeMap<u64, TextValue>,
-) -> EntityCommon {
+fn convert_common(entity: &entities::Entity, ctx: &Context<'_>) -> EntityCommon {
+    let (version, layers, linetypes) = (ctx.version, ctx.layers, ctx.linetypes);
     let c = &entity.common;
     let refs = &entity.references;
     let layer = match layers.get(&refs.layer) {

@@ -14,6 +14,8 @@ pub const TYPE_BLOCK_HEADER: u16 = 49;
 
 /// The type code of a layer.
 pub const TYPE_LAYER: u16 = 51;
+/// The type code of a text style.
+pub const TYPE_STYLE: u16 = 53;
 
 /// The type code of a linetype.
 pub const TYPE_LINETYPE: u16 = 57;
@@ -45,6 +47,16 @@ pub fn read_dimstyle_name(
     version: Version,
 ) -> Result<Option<TextValue>, ObjectError> {
     read_table_name(objects, entry, version, TYPE_DIMSTYLE)
+}
+
+/// Reads the name of the text style at `entry`; `Ok(None)` when the object is
+/// of another kind.
+pub fn read_style_name(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<Option<TextValue>, ObjectError> {
+    read_table_name(objects, entry, version, TYPE_STYLE)
 }
 
 /// Reads the name of the linetype at `entry`; `Ok(None)` when the object is of
