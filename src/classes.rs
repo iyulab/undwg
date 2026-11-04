@@ -40,12 +40,15 @@ pub struct ClassDef {
     pub was_a_zombie: bool,
     /// `0x1F2` for classes that produce entities, `0x1F3` for objects.
     pub item_class_id: i16,
-    /// How many objects of the class the drawing holds.
-    pub instance_count: i32,
-    /// The version of the application that defined the class.
-    pub dwg_version: i16,
-    /// The maintenance release of that version.
-    pub maintenance_version: i16,
+    /// How many objects of the class the drawing holds, as the file states
+    /// it; `None` in R2000, which does not store it. (Later files do not
+    /// always keep it up to date.)
+    pub instance_count: Option<i32>,
+    /// The version of the application that defined the class (in R2000 a
+    /// field the format does not fully explain).
+    pub dwg_version: Option<i16>,
+    /// The maintenance release of that version; `None` in R2000.
+    pub maintenance_version: Option<i16>,
 }
 
 /// Why the class definitions could not be read.
@@ -110,9 +113,10 @@ fn u32_at(b: &[u8], at: usize) -> u32 {
 
 /// Reads the class definitions from the assembled `AcDb:Classes` section.
 pub fn read_classes(section: &[u8], version: Version) -> Result<Vec<ClassDef>, ClassError> {
-    let unicode = match version {
-        Version::R2004 => false,
-        Version::R2010 | Version::R2013 | Version::R2018 => true,
+    let (unicode, r2000) = match version {
+        Version::R2000 => (false, true),
+        Version::R2004 => (false, false),
+        Version::R2010 | Version::R2013 | Version::R2018 => (true, false),
         v => return Err(ClassError::NotRead(v)),
     };
     // Sentinel and byte count.
@@ -164,24 +168,27 @@ pub fn read_classes(section: &[u8], version: Version) -> Result<Vec<ClassDef>, C
         (region.len() * 8, None)
     };
 
-    // Maximum class number, two zero bytes and a true bit.
-    let _max_class = main.bit_short()?;
-    if main.raw_char()? != 0 || main.raw_char()? != 0 {
-        return Err(ClassError::Unexpected {
-            what: "reserved bytes",
-        });
-    }
-    if !main.bit()? {
-        return Err(ClassError::Unexpected {
-            what: "reserved flag",
-        });
+    if !r2000 {
+        // Maximum class number, two zero bytes and a true bit.
+        let _max_class = main.bit_short()?;
+        if main.raw_char()? != 0 || main.raw_char()? != 0 {
+            return Err(ClassError::Unexpected {
+                what: "reserved bytes",
+            });
+        }
+        if !main.bit()? {
+            return Err(ClassError::Unexpected {
+                what: "reserved flag",
+            });
+        }
     }
 
     let mut classes = Vec::new();
     // A byte-aligned end leaves up to seven padding bits.
     while main_end.saturating_sub(main.position()) >= 8 {
         let number = main.bit_short()?;
-        let proxy_flags = main.bit_short()?;
+        // The second short: proxy flags in R2004 and later, a version in R2000.
+        let second_short = main.bit_short()?;
         let (app_name, cplusplus_name, dxf_name) = match strings.as_mut() {
             Some(s) => (read_unicode(s)?, read_unicode(s)?, read_unicode(s)?),
             None => (
@@ -192,11 +199,21 @@ pub fn read_classes(section: &[u8], version: Version) -> Result<Vec<ClassDef>, C
         };
         let was_a_zombie = main.bit()?;
         let item_class_id = main.bit_short()?;
-        let instance_count = main.bit_long()?;
-        let dwg_version = main.bit_short()?;
-        let maintenance_version = main.bit_short()?;
-        main.bit_long()?; // unknown, zero in every file read
-        main.bit_long()?; // unknown, zero in every file read
+        let (proxy_flags, instance_count, dwg_version, maintenance_version) = if r2000 {
+            (0, None, Some(second_short), None)
+        } else {
+            let instance_count = main.bit_long()?;
+            let dwg_version = main.bit_short()?;
+            let maintenance_version = main.bit_short()?;
+            main.bit_long()?; // unknown, zero in every file read
+            main.bit_long()?; // unknown, zero in every file read
+            (
+                second_short,
+                Some(instance_count),
+                Some(dwg_version),
+                Some(maintenance_version),
+            )
+        };
         classes.push(ClassDef {
             number,
             proxy_flags,
@@ -294,11 +311,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn versions_without_a_class_reader_are_named() {
-        assert_eq!(
-            read_classes(&[], Version::R2000),
-            Err(ClassError::NotRead(Version::R2000))
-        );
+    fn a_version_without_a_class_reader_is_named() {
         assert_eq!(
             read_classes(&[], Version::R2007),
             Err(ClassError::NotRead(Version::R2007))

@@ -25,9 +25,8 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | File header (R2000, R2004, R2010, R2013, R2018) with checksums | done |
 | File header of R2007 | planned |
 | Section page map, section map, decompression, section assembly (R2004 and later) | done |
-| Sections of R2000 | in progress |
-| Bit-coded values, class definitions (R2004 and later, R2007 excepted) | done |
-| Object map and object frames (R2004 and later; size, type, checksum) | done |
+| Bit-coded values, class definitions (R2000, R2004 and later; R2007 excepted) | done |
+| Object map and object frames (R2000, R2004 and later; size, type, checksum) | done |
 | Object contents, header variables | planned |
 | Entities, tables, blocks, header variables | planned |
 

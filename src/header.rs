@@ -46,6 +46,26 @@ pub struct HeaderR2000 {
     pub locators: Vec<SectionLocator>,
 }
 
+impl HeaderR2000 {
+    /// The bytes of the section the locator list gives for `record` (0 header
+    /// variables, 1 class definitions, 2 object map), or `None` when the list
+    /// has no such record. A section that runs past the end of `file` is a
+    /// [`HeaderError::Truncated`].
+    pub fn section<'a>(&self, file: &'a [u8], record: u8) -> Result<Option<&'a [u8]>, HeaderError> {
+        let Some(locator) = self.locators.iter().find(|l| l.record == record) else {
+            return Ok(None);
+        };
+        let start = locator.seeker as usize;
+        let end = start + locator.size as usize;
+        file.get(start..end)
+            .map(Some)
+            .ok_or(HeaderError::Truncated {
+                needed: end,
+                len: file.len(),
+            })
+    }
+}
+
 /// The unmasked block of an R2004-and-later header.
 ///
 /// Field names follow the specification. Offsets are as stored, except where
@@ -547,5 +567,49 @@ mod tests {
                 VersionError::UnsupportedVersion { .. }
             ))
         ));
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+
+    fn header() -> HeaderR2000 {
+        HeaderR2000 {
+            image_seeker: 0,
+            code_page: 30,
+            locators: vec![
+                SectionLocator {
+                    record: 0,
+                    seeker: 4,
+                    size: 8,
+                },
+                SectionLocator {
+                    record: 1,
+                    seeker: 100,
+                    size: 50,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_locator_gives_its_slice_of_the_file() {
+        let file: Vec<u8> = (0..=255).collect();
+        let h = header();
+        assert_eq!(h.section(&file, 0).unwrap(), Some(&file[4..12]));
+        assert_eq!(h.section(&file, 7).unwrap(), None);
+    }
+
+    #[test]
+    fn a_locator_that_runs_past_the_file_is_truncated_not_clipped() {
+        let file = vec![0u8; 120];
+        assert_eq!(
+            header().section(&file, 1),
+            Err(HeaderError::Truncated {
+                needed: 150,
+                len: 120
+            })
+        );
     }
 }

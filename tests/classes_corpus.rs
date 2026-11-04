@@ -1,7 +1,7 @@
 //! Class definitions of real R2004-family files.
 //!
 //! Point `UNDWG_CORPUS` at one or more directories (separated like `PATH`)
-//! holding `.dwg` files. Every R2004, R2010, R2013 and R2018 file must give
+//! holding `.dwg` files. Every R2000, R2004, R2010, R2013 and R2018 file must give
 //! class definitions: the section's checksum holds, the main stream and (from
 //! R2010) the string stream meet exactly where they should, and what is read
 //! is plausible -- numbers from 500 up and distinct, each class producing
@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use undwg::{read_classes, read_directory, read_header, read_section, FileHeader};
+use undwg::{read_classes, read_directory, read_header, read_section, FileHeader, Version};
 
 fn dwg_files(dir: &Path, into: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -47,14 +47,24 @@ fn every_real_class_section_reads_and_is_plausible() {
     let mut names: BTreeSet<String> = BTreeSet::new();
     for path in &files {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let Ok(FileHeader::R2004(version, header)) = read_header(&bytes) else {
-            continue;
+        let (version, section) = match read_header(&bytes) {
+            Ok(FileHeader::R2004(version, header)) => {
+                let dir = read_directory(&bytes, &header)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                let section = read_section(&bytes, &dir, "AcDb:Classes")
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                    .unwrap_or_else(|| panic!("{}: no class section", path.display()));
+                (version, section)
+            }
+            Ok(FileHeader::R2000(header)) => {
+                let section = header
+                    .section(&bytes, 1)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                    .unwrap_or_else(|| panic!("{}: no class locator", path.display()));
+                (Version::R2000, section.to_vec())
+            }
+            _ => continue,
         };
-        let dir =
-            read_directory(&bytes, &header).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let section = read_section(&bytes, &dir, "AcDb:Classes")
-            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-            .unwrap_or_else(|| panic!("{}: no class section", path.display()));
         let classes = read_classes(&section, version)
             .unwrap_or_else(|e| panic!("{} ({version}): {e}", path.display()));
 
@@ -86,7 +96,11 @@ fn every_real_class_section_reads_and_is_plausible() {
             {
                 with_empty_name += 1;
             }
-            assert!(class.instance_count >= 0, "{}", path.display());
+            assert!(
+                class.instance_count.is_none_or(|n| n >= 0),
+                "{}",
+                path.display()
+            );
             names.insert(class.dxf_name.clone());
         }
         files_read += 1;

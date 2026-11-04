@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use undwg::{
     read_classes, read_directory, read_header, read_object_frame, read_object_map, read_section,
-    FileHeader,
+    FileHeader, Version,
 };
 
 fn dwg_files(dir: &Path, into: &mut Vec<PathBuf>) {
@@ -53,17 +53,37 @@ fn every_real_object_has_an_intact_frame_and_the_counts_match_the_class_table() 
     let mut unreadable: Vec<String> = Vec::new();
     for path in &files {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let Ok(FileHeader::R2004(version, header)) = read_header(&bytes) else {
-            continue;
-        };
-        let dir =
-            read_directory(&bytes, &header).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let handles = read_section(&bytes, &dir, "AcDb:Handles")
-            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-            .unwrap_or_else(|| panic!("{}: no object map", path.display()));
-        let objects = read_section(&bytes, &dir, "AcDb:AcDbObjects")
-            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-            .unwrap_or_else(|| panic!("{}: no object section", path.display()));
+        // The class table, the object map and the object data, by the layout the version uses.
+        let (version, classes_section, handles, objects): (Version, Vec<u8>, Vec<u8>, Vec<u8>) =
+            match read_header(&bytes) {
+                Ok(FileHeader::R2004(version, header)) => {
+                    let dir = read_directory(&bytes, &header)
+                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    let get = |name: &str| {
+                        read_section(&bytes, &dir, name)
+                            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                            .unwrap_or_else(|| panic!("{}: no {name}", path.display()))
+                    };
+                    (
+                        version,
+                        get("AcDb:Classes"),
+                        get("AcDb:Handles"),
+                        get("AcDb:AcDbObjects"),
+                    )
+                }
+                Ok(FileHeader::R2000(header)) => {
+                    let get = |record: u8| {
+                        header
+                            .section(&bytes, record)
+                            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                            .unwrap_or_else(|| panic!("{}: no locator {record}", path.display()))
+                            .to_vec()
+                    };
+                    // R2000 object positions are offsets into the file itself.
+                    (Version::R2000, get(1), get(2), bytes.clone())
+                }
+                _ => continue,
+            };
         let entries = read_object_map(&handles)
             .unwrap_or_else(|e| panic!("{}: object map: {e}", path.display()));
         assert!(!entries.is_empty(), "{}", path.display());
@@ -113,7 +133,6 @@ fn every_real_object_has_an_intact_frame_and_the_counts_match_the_class_table() 
             ("OLE2FRAME", 0x4A),
             ("VBA_PROJECT", 0x51),
         ];
-        let classes_section = read_section(&bytes, &dir, "AcDb:Classes").unwrap().unwrap();
         let classes = read_classes(&classes_section, version).unwrap();
         for (index, class) in classes.iter().enumerate() {
             let code = FIXED
@@ -121,7 +140,9 @@ fn every_real_object_has_an_intact_frame_and_the_counts_match_the_class_table() 
                 .find(|(name, _)| *name == class.dxf_name)
                 .map_or(500 + index as u16, |(_, code)| *code);
             let found = by_type.get(&code).copied().unwrap_or(0);
-            let stated = i64::from(class.instance_count);
+            let Some(stated) = class.instance_count.map(i64::from) else {
+                continue; // R2000 does not state a count
+            };
             match (found as i64).cmp(&stated) {
                 std::cmp::Ordering::Equal => equal += 1,
                 std::cmp::Ordering::Less => fewer += 1,

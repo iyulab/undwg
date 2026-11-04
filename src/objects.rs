@@ -183,7 +183,7 @@ pub fn read_object_frame(
     version: Version,
 ) -> Result<ObjectFrame, ObjectError> {
     let from_r2010 = match version {
-        Version::R2004 => false,
+        Version::R2000 | Version::R2004 => false,
         Version::R2010 | Version::R2013 | Version::R2018 => true,
         v => return Err(ObjectError::NotRead(v)),
     };
