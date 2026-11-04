@@ -106,8 +106,9 @@ fn every_real_line_circle_and_arc_reads() {
         mut faces,
         mut texts,
         mut attributes,
+        mut mtexts,
         mut failed,
-    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
+    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
     let mut named_blocks = 0usize;
     let mut references_checked = 0usize;
     for path in &files {
@@ -166,7 +167,7 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 1..=3 | 7 | 17..=19 | 27 | 28 | 31 | 35 | 77) {
+            if !matches!(frame.type_code, 1..=3 | 7 | 17..=19 | 27 | 28 | 31 | 35 | 44 | 77) {
                 continue;
             }
             let entity = match read_entity(&objects, *entry, version) {
@@ -227,6 +228,9 @@ fn every_real_line_circle_and_arc_reads() {
             }
             if let Geometry::Text(t) = &entity.geometry {
                 expect(t.style, 53, "text style");
+            }
+            if let Geometry::Mtext(m) = &entity.geometry {
+                expect(m.style, 53, "multiline text style");
             }
             if let Geometry::Attrib(a) | Geometry::Attdef(a) = &entity.geometry {
                 expect(a.text.style, 53, "attribute text style");
@@ -349,6 +353,36 @@ fn every_real_line_circle_and_arc_reads() {
                     );
                     format!("TEXT\t{}", text_fields(t))
                 }
+                Geometry::Mtext(m) => {
+                    mtexts += 1;
+                    assert!(
+                        finite(&m.insertion)
+                            && finite(&m.extrusion)
+                            && finite(&m.x_axis)
+                            && m.text_height.is_finite()
+                            && m.rect_width.is_finite()
+                            && m.extents_width.is_finite()
+                            && m.extents_height.is_finite()
+                            && m.line_spacing_factor.is_finite(),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    // insertion, x axis, rectangle width, text height, attachment,
+                    // extents width and height, line spacing factor, text
+                    format!(
+                        "MTEXT\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+                        m.insertion,
+                        m.x_axis,
+                        m.rect_width,
+                        m.text_height,
+                        m.attachment,
+                        m.extents_width,
+                        m.extents_height,
+                        m.line_spacing_factor,
+                        text_hex(&m.value)
+                    )
+                }
                 Geometry::Attrib(a) | Geometry::Attdef(a) => {
                     attributes += 1;
                     assert!(
@@ -427,7 +461,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");

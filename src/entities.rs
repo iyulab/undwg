@@ -27,6 +27,8 @@ pub const TYPE_LINE: u16 = 19;
 pub const TYPE_POINT: u16 = 27;
 /// The type code of a text.
 pub const TYPE_TEXT: u16 = 1;
+/// The type code of a multiline text.
+pub const TYPE_MTEXT: u16 = 44;
 /// The type code of an attribute.
 pub const TYPE_ATTRIB: u16 = 2;
 /// The type code of an attribute definition.
@@ -198,6 +200,40 @@ pub struct Text {
     pub style: u64,
 }
 
+/// A multiline text. Its value keeps the formatting codes the file stores.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mtext {
+    /// The insertion point.
+    pub insertion: [f64; 3],
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// The direction the text runs along (the x axis of its frame).
+    pub x_axis: [f64; 3],
+    /// The width of the reference rectangle (`0` when none).
+    pub rect_width: f64,
+    /// The height of the reference rectangle (R2007 and later).
+    pub rect_height: f64,
+    /// The height of the characters.
+    pub text_height: f64,
+    /// How the text hangs on the insertion point: top left `1`, top centre `2`,
+    /// top right `3`, middle left `4` ... bottom right `9`.
+    pub attachment: i16,
+    /// The drawing direction: left to right `1`, top to bottom `3`, by style `5`.
+    pub drawing_direction: i16,
+    /// The height of the text as laid out.
+    pub extents_height: f64,
+    /// The width of the text as laid out.
+    pub extents_width: f64,
+    /// The text.
+    pub value: TextValue,
+    /// The line spacing style: at least `1`, exact `2`.
+    pub line_spacing_style: i16,
+    /// The line spacing factor.
+    pub line_spacing_factor: f64,
+    /// The handle of the text style.
+    pub style: u64,
+}
+
 /// An attribute (a text that belongs to a block insertion) or an attribute
 /// definition (the template of one, inside a block definition): a text with a tag.
 #[derive(Debug, Clone, PartialEq)]
@@ -322,6 +358,8 @@ pub enum Geometry {
     Insert(Insert),
     /// A line of text.
     Text(Text),
+    /// A multiline text.
+    Mtext(Mtext),
     /// An attribute of a block insertion.
     Attrib(Attribute),
     /// An attribute definition.
@@ -672,6 +710,108 @@ fn read_ellipse(r: &mut BitReader<'_>) -> Result<Ellipse, BitError> {
     })
 }
 
+/// Skips a colour as R2004 and later write it: a short that is always zero, the
+/// RGB value, and a flag byte that says whether a colour name and a book name follow.
+fn skip_color(r: &mut BitReader<'_>, strings: &mut Option<BitReader<'_>>) -> Result<(), BitError> {
+    r.bit_short()?;
+    r.bit_long()?;
+    let flags = r.raw_char()?;
+    if flags & 1 != 0 {
+        text_value(r, strings)?;
+    }
+    if flags & 2 != 0 {
+        text_value(r, strings)?;
+    }
+    Ok(())
+}
+
+/// Reads a multiline text.
+///
+/// The second value says whether the handle stream names a registered
+/// application after the style (R2018, when the text is not annotative).
+fn read_mtext(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+) -> Result<(Mtext, bool), BitError> {
+    let insertion = r.point_3bd()?;
+    let extrusion = r.point_3bd()?;
+    let x_axis = r.point_3bd()?;
+    let rect_width = r.bit_double()?;
+    let rect_height = if version >= Version::R2007 {
+        r.bit_double()?
+    } else {
+        0.0
+    };
+    let text_height = r.bit_double()?;
+    let attachment = r.bit_short()?;
+    let drawing_direction = r.bit_short()?;
+    let extents_height = r.bit_double()?;
+    let extents_width = r.bit_double()?;
+    let value = text_value(r, strings)?;
+    let line_spacing_style = r.bit_short()?;
+    let line_spacing_factor = r.bit_double()?;
+    r.bit()?; // a bit the format leaves unexplained
+    if version >= Version::R2004 {
+        let background = r.bit_long()?;
+        let framed = version >= Version::R2018 && background & 0x10 != 0;
+        if background & 1 != 0 || framed {
+            // The background scale factor. The specification types it as a bit
+            // long yet gives it the default 1.5, so it is read as a bit double;
+            // no file of the corpus has a background to say which is right.
+            r.bit_double()?;
+            skip_color(r, strings)?;
+            r.bit_long()?; // the background transparency
+        }
+    }
+    let mut application = false;
+    if version >= Version::R2018 && r.bit()? {
+        // Not annotative: a version, a flag, the fields stated a second time
+        // and the column data follow.
+        r.bit_short()?;
+        r.bit()?;
+        application = true;
+        r.bit_long()?; // attachment point
+        r.point_3bd()?; // x axis direction
+        r.point_3bd()?; // insertion point
+        for _ in 0..4 {
+            r.bit_double()?; // rectangle width and height, extents width and height
+        }
+        let column_type = r.bit_short()?;
+        if column_type != 0 {
+            let heights = bounded_count(r, "column height count")?;
+            r.bit_double()?; // column width
+            r.bit_double()?; // gutter
+            let auto_height = r.bit()?;
+            r.bit()?; // flow reversed
+            if !auto_height && column_type == 2 {
+                for _ in 0..heights {
+                    r.bit_double()?;
+                }
+            }
+        }
+    }
+    Ok((
+        Mtext {
+            insertion,
+            extrusion,
+            x_axis,
+            rect_width,
+            rect_height,
+            text_height,
+            attachment,
+            drawing_direction,
+            extents_height,
+            extents_width,
+            value,
+            line_spacing_style,
+            line_spacing_factor,
+            style: 0,
+        },
+        application,
+    ))
+}
+
 /// A text value from where the version keeps it: the string stream from R2010,
 /// the main stream before.
 fn text_value(
@@ -687,9 +827,9 @@ fn text_value(
 /// Reads an attribute or an attribute definition: a text, then the tag, the
 /// flags and, for a definition, the prompt.
 ///
-/// From R2010 a byte follows the text (the version of the form; R2018 adds the
-/// attribute type next), and a definition has one more byte after the lock
-/// flag. Their layout is what real files show: the main stream ends exactly
+/// From R2010 a version byte follows the text (R2018 adds the attribute type
+/// next), and a definition has a second version byte after the lock flag, as
+/// the specification lists. Real files agree: the main stream ends exactly
 /// where it should with them, and not without.
 fn read_attribute(
     r: &mut BitReader<'_>,
@@ -862,6 +1002,7 @@ pub fn read_entity(
             | TYPE_LWPOLYLINE
             | TYPE_INSERT
             | TYPE_TEXT
+            | TYPE_MTEXT
             | TYPE_ATTRIB
             | TYPE_ATTDEF
             | TYPE_ELLIPSE
@@ -877,6 +1018,7 @@ pub fn read_entity(
         });
     }
     let mut owned = 0;
+    let mut registered_application = false;
     // From R2007 the text values of an entity are in its string stream.
     let mut strings = layout.strings.map(|(from, _)| {
         let mut s = r.clone();
@@ -894,6 +1036,11 @@ pub fn read_entity(
             Geometry::Insert(insert)
         }
         TYPE_TEXT => Geometry::Text(read_text(&mut r, &mut strings)?),
+        TYPE_MTEXT => {
+            let (mtext, application) = read_mtext(&mut r, &mut strings, version)?;
+            registered_application = application;
+            Geometry::Mtext(mtext)
+        }
         TYPE_ATTRIB => Geometry::Attrib(read_attribute(&mut r, &mut strings, version, false)?),
         TYPE_ATTDEF => Geometry::Attdef(read_attribute(&mut r, &mut strings, version, true)?),
         TYPE_ELLIPSE => Geometry::Ellipse(read_ellipse(&mut r)?),
@@ -919,18 +1066,22 @@ pub fn read_entity(
     let mut h = r.clone();
     h.seek(layout.handle_start);
     let references = read_references(&mut h, &common, flags)?;
-    let text = match &mut geometry {
-        Geometry::Text(t) => Some(t),
-        Geometry::Attrib(a) | Geometry::Attdef(a) => Some(&mut a.text),
+    let style = match &mut geometry {
+        Geometry::Text(t) => Some(&mut t.style),
+        Geometry::Mtext(m) => Some(&mut m.style),
+        Geometry::Attrib(a) | Geometry::Attdef(a) => Some(&mut a.text.style),
         _ => None,
     };
-    if let Some(text) = text {
-        text.style = h
+    if let Some(style) = style {
+        *style = h
             .handle()?
             .resolve(common.handle)
             .ok_or(ObjectError::Unexpected {
                 what: "text style handle",
             })?;
+    }
+    if registered_application {
+        h.handle()?; // the registered application
     }
     if let Geometry::Insert(insert) = &mut geometry {
         insert.block = h
