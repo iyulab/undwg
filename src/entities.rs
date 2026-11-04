@@ -3,7 +3,8 @@
 //! An entity begins with data every entity has -- its handle, extended data,
 //! a flag for a stored graphic, colour, linetype scale and so on -- and then
 //! the fields of its own kind. This module reads the common data and the
-//! simplest kinds: lines, circles, arcs and points. Any other kind is left
+//! simplest kinds: lines, circles, arcs, points and lightweight polylines.
+//! Any other kind is left
 //! alone (`Ok(None)`), never guessed at.
 //!
 //! Only the main bit stream is read; the strings and handle references that
@@ -21,6 +22,8 @@ pub const TYPE_CIRCLE: u16 = 18;
 pub const TYPE_LINE: u16 = 19;
 /// The type code of a point.
 pub const TYPE_POINT: u16 = 27;
+/// The type code of a lightweight polyline.
+pub const TYPE_LWPOLYLINE: u16 = 77;
 
 /// What every entity states about itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +105,41 @@ pub struct Point {
     pub x_axis_angle: f64,
 }
 
+/// One vertex of a lightweight polyline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LwVertex {
+    /// The vertex, in the polyline's own plane.
+    pub point: [f64; 2],
+    /// The bulge of the segment that leaves the vertex (`0` when none is stated).
+    pub bulge: f64,
+    /// The width at the start of the segment that leaves the vertex (`0` when
+    /// the polyline states none of its own).
+    pub start_width: f64,
+    /// The width at the end of that segment.
+    pub end_width: f64,
+}
+
+/// A lightweight polyline: vertices in one plane, each with the bulge and the
+/// widths of the segment leaving it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LwPolyline {
+    /// The polyline flag word, as stored.
+    pub flags: i16,
+    /// Whether the last vertex joins back to the first (flag bit 512).
+    pub closed: bool,
+    /// The width every segment has when no vertex states a width of its own
+    /// (`0` when none is stated).
+    pub const_width: f64,
+    /// The elevation of the plane (`0` when none is stated).
+    pub elevation: f64,
+    /// The thickness (`0` when none is stated).
+    pub thickness: f64,
+    /// The normal of the plane (`0, 0, 1` when none is stated).
+    pub normal: [f64; 3],
+    /// The vertices in order.
+    pub vertices: Vec<LwVertex>,
+}
+
 /// The geometry of an entity of a kind this reader reads.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -114,6 +152,8 @@ pub enum Geometry {
     Arc(Arc),
     /// A point.
     Point(Point),
+    /// A lightweight polyline.
+    LwPolyline(LwPolyline),
 }
 
 /// An entity: its common data and its geometry.
@@ -256,6 +296,91 @@ fn read_arc(r: &mut BitReader<'_>) -> Result<Arc, BitError> {
     })
 }
 
+/// A count the stream states, bounded by what is left to read: every item
+/// takes at least one bit, so a count above the bits left is damaged data and
+/// must not allocate.
+fn bounded_count(r: &mut BitReader<'_>, what: &'static str) -> Result<usize, BitError> {
+    let n = r.bit_long()?;
+    usize::try_from(n)
+        .ok()
+        .filter(|&n| n <= r.remaining())
+        .ok_or(BitError::TooLong { form: what })
+}
+
+fn read_lwpolyline(r: &mut BitReader<'_>, version: Version) -> Result<LwPolyline, BitError> {
+    let flags = r.bit_short()?;
+    let bits = flags as u16;
+    let const_width = if bits & 4 != 0 { r.bit_double()? } else { 0.0 };
+    let elevation = if bits & 8 != 0 { r.bit_double()? } else { 0.0 };
+    let thickness = if bits & 2 != 0 { r.bit_double()? } else { 0.0 };
+    let normal = if bits & 1 != 0 {
+        r.point_3bd()?
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let count = bounded_count(r, "polyline vertex count")?;
+    let bulge_count = if bits & 16 != 0 {
+        bounded_count(r, "polyline bulge count")?
+    } else {
+        0
+    };
+    let id_count = if version >= Version::R2010 && bits & 1024 != 0 {
+        bounded_count(r, "polyline vertex id count")?
+    } else {
+        0
+    };
+    let width_count = if bits & 32 != 0 {
+        bounded_count(r, "polyline width count")?
+    } else {
+        0
+    };
+
+    let mut vertices: Vec<LwVertex> = Vec::with_capacity(count);
+    for i in 0..count {
+        let point = if i == 0 {
+            [r.raw_double()?, r.raw_double()?]
+        } else {
+            // Each later vertex is a difference-coded double pair: the previous
+            // vertex stands in for what the stream leaves out.
+            let previous = vertices[i - 1].point;
+            let x = r.bit_double_with_default(previous[0])?;
+            let y = r.bit_double_with_default(previous[1])?;
+            [x, y]
+        };
+        vertices.push(LwVertex {
+            point,
+            bulge: 0.0,
+            start_width: 0.0,
+            end_width: 0.0,
+        });
+    }
+    for i in 0..bulge_count {
+        let bulge = r.bit_double()?;
+        if let Some(v) = vertices.get_mut(i) {
+            v.bulge = bulge;
+        }
+    }
+    for _ in 0..id_count {
+        r.bit_long()?; // a vertex identifier, not needed for geometry
+    }
+    for i in 0..width_count {
+        let (start, end) = (r.bit_double()?, r.bit_double()?);
+        if let Some(v) = vertices.get_mut(i) {
+            v.start_width = start;
+            v.end_width = end;
+        }
+    }
+    Ok(LwPolyline {
+        flags,
+        closed: bits & 512 != 0,
+        const_width,
+        elevation,
+        thickness,
+        normal,
+        vertices,
+    })
+}
+
 fn read_point(r: &mut BitReader<'_>) -> Result<Point, BitError> {
     Ok(Point {
         position: r.point_3bd()?,
@@ -265,7 +390,8 @@ fn read_point(r: &mut BitReader<'_>) -> Result<Point, BitError> {
     })
 }
 
-/// Reads the entity at `entry` if it is a line, a circle, an arc or a point;
+/// Reads the entity at `entry` if it is a line, a circle, an arc, a point or a
+/// lightweight polyline;
 /// `Ok(None)` for any other kind of object.
 ///
 /// `objects` is the assembled `AcDb:AcDbObjects` section (for R2000 the
@@ -279,7 +405,7 @@ pub fn read_entity(
     let (frame, mut r) = open_object(objects, entry, version)?;
     if !matches!(
         frame.type_code,
-        TYPE_ARC | TYPE_CIRCLE | TYPE_LINE | TYPE_POINT
+        TYPE_ARC | TYPE_CIRCLE | TYPE_LINE | TYPE_POINT | TYPE_LWPOLYLINE
     ) {
         return Ok(None);
     }
@@ -293,6 +419,7 @@ pub fn read_entity(
         TYPE_LINE => Geometry::Line(read_line(&mut r)?),
         TYPE_POINT => Geometry::Point(read_point(&mut r)?),
         TYPE_CIRCLE => Geometry::Circle(read_circle(&mut r)?),
+        TYPE_LWPOLYLINE => Geometry::LwPolyline(read_lwpolyline(&mut r, version)?),
         _ => Geometry::Arc(read_arc(&mut r)?),
     };
     Ok(Some(Entity { common, geometry }))

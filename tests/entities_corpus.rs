@@ -1,7 +1,7 @@
 //! Lines, circles, arcs and points of real files.
 //!
 //! Point `UNDWG_CORPUS` at one or more directories (separated like `PATH`)
-//! holding `.dwg` files. Every line, circle, arc and point whose frame is intact must
+//! holding `.dwg` files. Every line, circle, arc, point and lightweight polyline whose frame is intact must
 //! read, state the handle the object map gives, and hold finite numbers (and
 //! a non-negative radius). With `UNDWG_DUMP` set to a file name, every entity
 //! read is also written there, one per line, so that it can be compared with
@@ -53,8 +53,8 @@ fn every_real_line_circle_and_arc_reads() {
         std::io::BufWriter::new(std::fs::File::create(p).expect("UNDWG_DUMP is writable"))
     });
 
-    let (mut files_read, mut lines, mut circles, mut arcs, mut points, mut failed) =
-        (0, 0, 0, 0, 0, 0usize);
+    let (mut files_read, mut lines, mut circles, mut arcs, mut points, mut polylines, mut failed) =
+        (0, 0, 0, 0, 0, 0, 0usize);
     for path in &files {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let (version, handles, objects): (Version, Vec<u8>, Vec<u8>) = match read_header(&bytes) {
@@ -90,7 +90,7 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 17..=19 | 27) {
+            if !matches!(frame.type_code, 17..=19 | 27 | 77) {
                 continue;
             }
             let entity = match read_entity(&objects, *entry, version) {
@@ -162,6 +162,38 @@ fn every_real_line_circle_and_arc_reads() {
                     );
                     format!("POINT	{:?}", p.position)
                 }
+                Geometry::LwPolyline(p) => {
+                    polylines += 1;
+                    assert!(
+                        p.elevation.is_finite()
+                            && p.const_width.is_finite()
+                            && p.thickness.is_finite()
+                            && finite(&p.normal)
+                            && p.vertices.iter().all(|v| {
+                                v.point.iter().all(|c| c.is_finite())
+                                    && v.bulge.is_finite()
+                                    && v.start_width.is_finite()
+                                    && v.end_width.is_finite()
+                            }),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    // closed, elevation, constant width, normal, then x y bulge start-width end-width per vertex
+                    let flat: Vec<f64> = p
+                        .vertices
+                        .iter()
+                        .flat_map(|v| [v.point[0], v.point[1], v.bulge, v.start_width, v.end_width])
+                        .collect();
+                    format!(
+                        "LWPOLYLINE\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+                        i32::from(p.closed),
+                        p.elevation,
+                        p.const_width,
+                        p.normal,
+                        flat
+                    )
+                }
                 _ => continue,
             };
             if let Some(out) = dump.as_mut() {
@@ -170,7 +202,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points read; {failed} unreadable"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines read; {failed} unreadable"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");
