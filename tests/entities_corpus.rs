@@ -12,8 +12,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use undwg::{
-    read_block_name, read_classes, read_directory, read_entity, read_header, read_object_frame,
-    read_object_map, read_section, FileHeader, Geometry, TextValue, Version,
+    read_block_name, read_classes, read_dimstyle_name, read_directory, read_entity, read_header,
+    read_object_frame, read_object_map, read_section, FileHeader, Geometry, TextValue, Version,
 };
 
 /// A text as the dump writes it: `U:` and the hex of its UTF-8 for Unicode
@@ -107,8 +107,9 @@ fn every_real_line_circle_and_arc_reads() {
         mut texts,
         mut attributes,
         mut mtexts,
+        mut dimensions,
         mut failed,
-    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
+    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
     let mut named_blocks = 0usize;
     let mut references_checked = 0usize;
     for path in &files {
@@ -159,6 +160,16 @@ fn every_real_line_circle_and_arc_reads() {
                 Err(err) => panic!("{}: block header {:#x}: {err}", path.display(), e.handle),
             })
             .collect();
+        // The name of every dimension style.
+        let style_names: std::collections::BTreeMap<u64, TextValue> = entries
+            .iter()
+            .filter(|e| e.offset < objects.len() as u64)
+            .filter_map(|e| match read_dimstyle_name(&objects, *e, version) {
+                Ok(Some(name)) => Some((e.handle, name)),
+                Ok(None) => None,
+                Err(err) => panic!("{}: dimension style {:#x}: {err}", path.display(), e.handle),
+            })
+            .collect();
         for entry in &entries {
             if entry.offset >= objects.len() as u64 {
                 continue;
@@ -167,7 +178,8 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 1..=3 | 7 | 17..=19 | 27 | 28 | 31 | 35 | 44 | 77) {
+            if !matches!(frame.type_code, 1..=3 | 7 | 17..=19 | 20..=26 | 27 | 28 | 31 | 35 | 44 | 77)
+            {
                 continue;
             }
             let entity = match read_entity(&objects, *entry, version) {
@@ -231,6 +243,14 @@ fn every_real_line_circle_and_arc_reads() {
             }
             if let Geometry::Mtext(m) = &entity.geometry {
                 expect(m.style, 53, "multiline text style");
+            }
+            if let Geometry::Dimension(d) = &entity.geometry {
+                if let Some(style) = d.style {
+                    expect(style, 69, "dimension style");
+                }
+                if let Some(block) = d.block {
+                    expect(block, 49, "dimension block");
+                }
             }
             if let Geometry::Attrib(a) | Geometry::Attdef(a) = &entity.geometry {
                 expect(a.text.style, 53, "attribute text style");
@@ -353,6 +373,42 @@ fn every_real_line_circle_and_arc_reads() {
                     );
                     format!("TEXT\t{}", text_fields(t))
                 }
+                Geometry::Dimension(d) => {
+                    dimensions += 1;
+                    // A dimension may have no block (it is drawn when it is shown) or no style.
+                    let block = d.block.map(|b| &block_names[&b]);
+                    let style = d.style.map(|b| &style_names[&b]);
+                    let name = |t: Option<&TextValue>| t.map_or(String::new(), text_hex);
+                    assert!(
+                        finite(&d.definition_point)
+                            && finite(&d.extrusion)
+                            && d.measurement.is_finite()
+                            && d.text_rotation.is_finite(),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    // kind, block name, style name, user text, 10-point, text middle, 13, 14, 15 and 16-points (empty when
+                    // the kind has none), dimension rotation, text rotation, measurement, ordinate flags
+                    let opt3 = |p: Option<[f64; 3]>| p.map(|p| p.to_vec()).unwrap_or_default();
+                    format!(
+                        "DIMENSION\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+                        format!("{:?}", d.kind),
+                        name(block),
+                        name(style),
+                        text_hex(&d.user_text),
+                        d.definition_point,
+                        d.text_midpoint,
+                        opt3(d.point13),
+                        opt3(d.point14),
+                        opt3(d.point15),
+                        d.point16.map(|p| p.to_vec()).unwrap_or_default(),
+                        d.rotation.unwrap_or(0.0),
+                        d.text_rotation,
+                        d.measurement,
+                        d.ordinate_flags.map_or(-1, i32::from)
+                    )
+                }
                 Geometry::Mtext(m) => {
                     mtexts += 1;
                     assert!(
@@ -461,7 +517,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");

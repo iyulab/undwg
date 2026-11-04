@@ -10,6 +10,9 @@ use crate::version::Version;
 /// The type code of a block header.
 pub const TYPE_BLOCK_HEADER: u16 = 49;
 
+/// The type code of a dimension style.
+pub const TYPE_DIMSTYLE: u16 = 69;
+
 /// Reads the name of the block header at `entry`; `Ok(None)` when the object
 /// is of another kind.
 ///
@@ -20,8 +23,27 @@ pub fn read_block_name(
     entry: ObjectEntry,
     version: Version,
 ) -> Result<Option<TextValue>, ObjectError> {
+    read_table_name(objects, entry, version, TYPE_BLOCK_HEADER)
+}
+
+/// Reads the name of the dimension style at `entry`; `Ok(None)` when the
+/// object is of another kind.
+pub fn read_dimstyle_name(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<Option<TextValue>, ObjectError> {
+    read_table_name(objects, entry, version, TYPE_DIMSTYLE)
+}
+
+fn read_table_name(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+    type_code: u16,
+) -> Result<Option<TextValue>, ObjectError> {
     let (frame, mut r, layout) = open_object(objects, entry, version)?;
-    if frame.type_code != TYPE_BLOCK_HEADER {
+    if frame.type_code != type_code {
         return Ok(None);
     }
     if version < Version::R2010 {
@@ -29,7 +51,7 @@ pub fn read_block_name(
     }
     if r.handle()?.value != entry.handle {
         return Err(ObjectError::Unexpected {
-            what: "block header handle",
+            what: "table entry handle",
         });
     }
     skip_extended_data(&mut r)?;
@@ -47,7 +69,7 @@ pub fn read_block_name(
             let name = s.text(true)?;
             if s.position() > to {
                 return Err(ObjectError::Unexpected {
-                    what: "block header string length",
+                    what: "table entry string length",
                 });
             }
             name

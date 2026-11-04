@@ -27,6 +27,20 @@ pub const TYPE_LINE: u16 = 19;
 pub const TYPE_POINT: u16 = 27;
 /// The type code of a text.
 pub const TYPE_TEXT: u16 = 1;
+/// The type code of an ordinate dimension.
+pub const TYPE_DIMENSION_ORDINATE: u16 = 20;
+/// The type code of a linear (rotated) dimension.
+pub const TYPE_DIMENSION_LINEAR: u16 = 21;
+/// The type code of an aligned dimension.
+pub const TYPE_DIMENSION_ALIGNED: u16 = 22;
+/// The type code of a three-point angular dimension.
+pub const TYPE_DIMENSION_ANGULAR_3POINT: u16 = 23;
+/// The type code of a two-line angular dimension.
+pub const TYPE_DIMENSION_ANGULAR_2LINE: u16 = 24;
+/// The type code of a radius dimension.
+pub const TYPE_DIMENSION_RADIUS: u16 = 25;
+/// The type code of a diameter dimension.
+pub const TYPE_DIMENSION_DIAMETER: u16 = 26;
 /// The type code of a multiline text.
 pub const TYPE_MTEXT: u16 = 44;
 /// The type code of an attribute.
@@ -200,6 +214,86 @@ pub struct Text {
     pub style: u64,
 }
 
+/// What a dimension measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DimensionKind {
+    /// The distance of a point from the origin along one axis.
+    Ordinate,
+    /// A distance along a rotated line.
+    Linear,
+    /// A distance along the line between the two points.
+    Aligned,
+    /// An angle given by three points.
+    Angular3Point,
+    /// An angle between two lines.
+    Angular2Line,
+    /// A radius.
+    Radius,
+    /// A diameter.
+    Diameter,
+}
+
+/// A dimension: the data every kind has and the points of its own kind. The
+/// points are named as the format numbers them (the DXF group numbers).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dimension {
+    /// What it measures.
+    pub kind: DimensionKind,
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// The middle of the dimension text.
+    pub text_midpoint: [f64; 2],
+    /// The z of the text middle and the 12-point.
+    pub elevation: f64,
+    /// Bit 0: the text is not at its default place (the opposite of the DXF 70 bit 128).
+    pub flags: u8,
+    /// The text the user typed instead of the measurement: empty for the measurement, a single space to suppress it.
+    pub user_text: TextValue,
+    /// The rotation of the text.
+    pub text_rotation: f64,
+    /// The horizontal direction of the dimension.
+    pub horizontal_direction: f64,
+    /// The scale of the insertion of the anonymous block that draws the dimension.
+    pub insert_scale: [f64; 3],
+    /// The rotation of that insertion.
+    pub insert_rotation: f64,
+    /// The attachment point of the text (R2000 and later).
+    pub attachment_point: i16,
+    /// The line spacing style (R2000 and later).
+    pub line_spacing_style: i16,
+    /// The line spacing factor (R2000 and later).
+    pub line_spacing_factor: f64,
+    /// The measurement the file states (R2000 and later).
+    pub measurement: f64,
+    /// Whether the first and the second arrow are flipped (R2007 and later).
+    pub flip_arrows: [bool; 2],
+    /// The 12-point: where the text was dragged to.
+    pub point12: [f64; 2],
+    /// The 10-point: where the dimension line is defined.
+    pub definition_point: [f64; 3],
+    /// The 13-point: the first extension line origin or the first point of an angle.
+    pub point13: Option<[f64; 3]>,
+    /// The 14-point: the second extension line origin or the second point of an angle.
+    pub point14: Option<[f64; 3]>,
+    /// The 15-point: the centre of an angle, or the point on the arc of a radius or diameter.
+    pub point15: Option<[f64; 3]>,
+    /// The 16-point: the place on the arc a two-line angle is dimensioned at.
+    pub point16: Option<[f64; 2]>,
+    /// The rotation of the extension lines (linear and aligned).
+    pub extension_rotation: Option<f64>,
+    /// The rotation of the dimension line (linear).
+    pub rotation: Option<f64>,
+    /// The leader length (radius and diameter).
+    pub leader_length: Option<f64>,
+    /// Which axis an ordinate dimension measures: bit 0 set for x.
+    pub ordinate_flags: Option<u8>,
+    /// The handle of the dimension style.
+    pub style: Option<u64>,
+    /// The handle of the anonymous block that draws the dimension, when it has one.
+    pub block: Option<u64>,
+}
+
 /// A multiline text. Its value keeps the formatting codes the file stores.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mtext {
@@ -360,6 +454,8 @@ pub enum Geometry {
     Text(Text),
     /// A multiline text.
     Mtext(Mtext),
+    /// A dimension.
+    Dimension(Dimension),
     /// An attribute of a block insertion.
     Attrib(Attribute),
     /// An attribute definition.
@@ -725,6 +821,115 @@ fn skip_color(r: &mut BitReader<'_>, strings: &mut Option<BitReader<'_>>) -> Res
     Ok(())
 }
 
+/// Reads a dimension: the data every kind has, then the points of the kind.
+fn read_dimension(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+    kind: DimensionKind,
+) -> Result<Dimension, BitError> {
+    if version >= Version::R2010 {
+        r.raw_char()?; // the version of the dimension's own form
+    }
+    let extrusion = r.point_3bd()?;
+    let text_midpoint = [r.raw_double()?, r.raw_double()?];
+    let elevation = r.bit_double()?;
+    let flags = r.raw_char()?;
+    let user_text = text_value(r, strings)?;
+    let text_rotation = r.bit_double()?;
+    let horizontal_direction = r.bit_double()?;
+    let insert_scale = r.point_3bd()?;
+    let insert_rotation = r.bit_double()?;
+    let (mut attachment_point, mut line_spacing_style, mut line_spacing_factor, mut measurement) =
+        (0, 0, 0.0, 0.0);
+    if version >= Version::R2000 {
+        attachment_point = r.bit_short()?;
+        line_spacing_style = r.bit_short()?;
+        line_spacing_factor = r.bit_double()?;
+        measurement = r.bit_double()?;
+    }
+    let mut flip_arrows = [false; 2];
+    if version >= Version::R2007 {
+        r.bit()?; // undocumented
+        flip_arrows = [r.bit()?, r.bit()?];
+    }
+    let point12 = [r.raw_double()?, r.raw_double()?];
+    let mut d = Dimension {
+        kind,
+        extrusion,
+        text_midpoint,
+        elevation,
+        flags,
+        user_text,
+        text_rotation,
+        horizontal_direction,
+        insert_scale,
+        insert_rotation,
+        attachment_point,
+        line_spacing_style,
+        line_spacing_factor,
+        measurement,
+        flip_arrows,
+        point12,
+        definition_point: [0.0; 3],
+        point13: None,
+        point14: None,
+        point15: None,
+        point16: None,
+        extension_rotation: None,
+        rotation: None,
+        leader_length: None,
+        ordinate_flags: None,
+        style: None,
+        block: None,
+    };
+    match kind {
+        DimensionKind::Ordinate => {
+            d.definition_point = r.point_3bd()?;
+            d.point13 = Some(r.point_3bd()?);
+            d.point14 = Some(r.point_3bd()?);
+            d.ordinate_flags = Some(r.raw_char()?);
+        }
+        DimensionKind::Linear => {
+            d.point13 = Some(r.point_3bd()?);
+            d.point14 = Some(r.point_3bd()?);
+            d.definition_point = r.point_3bd()?;
+            d.extension_rotation = Some(r.bit_double()?);
+            d.rotation = Some(r.bit_double()?);
+        }
+        DimensionKind::Aligned => {
+            d.point13 = Some(r.point_3bd()?);
+            d.point14 = Some(r.point_3bd()?);
+            d.definition_point = r.point_3bd()?;
+            d.extension_rotation = Some(r.bit_double()?);
+        }
+        DimensionKind::Angular3Point => {
+            d.definition_point = r.point_3bd()?;
+            d.point13 = Some(r.point_3bd()?);
+            d.point14 = Some(r.point_3bd()?);
+            d.point15 = Some(r.point_3bd()?);
+        }
+        DimensionKind::Angular2Line => {
+            d.point16 = Some([r.raw_double()?, r.raw_double()?]);
+            d.point13 = Some(r.point_3bd()?);
+            d.point14 = Some(r.point_3bd()?);
+            d.point15 = Some(r.point_3bd()?);
+            d.definition_point = r.point_3bd()?;
+        }
+        DimensionKind::Radius => {
+            d.definition_point = r.point_3bd()?;
+            d.point15 = Some(r.point_3bd()?);
+            d.leader_length = Some(r.bit_double()?);
+        }
+        DimensionKind::Diameter => {
+            d.point15 = Some(r.point_3bd()?);
+            d.definition_point = r.point_3bd()?;
+            d.leader_length = Some(r.bit_double()?);
+        }
+    }
+    Ok(d)
+}
+
 /// Reads a multiline text.
 ///
 /// The second value says whether the handle stream names a registered
@@ -1003,11 +1208,13 @@ pub fn read_entity(
             | TYPE_INSERT
             | TYPE_TEXT
             | TYPE_MTEXT
-            | TYPE_ATTRIB
-            | TYPE_ATTDEF
-            | TYPE_ELLIPSE
-            | TYPE_SOLID
-            | TYPE_3DFACE
+            | TYPE_DIMENSION_ORDINATE
+            ..=TYPE_DIMENSION_DIAMETER
+                | TYPE_ATTRIB
+                | TYPE_ATTDEF
+                | TYPE_ELLIPSE
+                | TYPE_SOLID
+                | TYPE_3DFACE
     ) {
         return Ok(None);
     }
@@ -1036,6 +1243,18 @@ pub fn read_entity(
             Geometry::Insert(insert)
         }
         TYPE_TEXT => Geometry::Text(read_text(&mut r, &mut strings)?),
+        TYPE_DIMENSION_ORDINATE..=TYPE_DIMENSION_DIAMETER => {
+            let kind = match frame.type_code {
+                TYPE_DIMENSION_ORDINATE => DimensionKind::Ordinate,
+                TYPE_DIMENSION_LINEAR => DimensionKind::Linear,
+                TYPE_DIMENSION_ALIGNED => DimensionKind::Aligned,
+                TYPE_DIMENSION_ANGULAR_3POINT => DimensionKind::Angular3Point,
+                TYPE_DIMENSION_ANGULAR_2LINE => DimensionKind::Angular2Line,
+                TYPE_DIMENSION_RADIUS => DimensionKind::Radius,
+                _ => DimensionKind::Diameter,
+            };
+            Geometry::Dimension(read_dimension(&mut r, &mut strings, version, kind)?)
+        }
         TYPE_MTEXT => {
             let (mtext, application) = read_mtext(&mut r, &mut strings, version)?;
             registered_application = application;
@@ -1082,6 +1301,14 @@ pub fn read_entity(
     }
     if registered_application {
         h.handle()?; // the registered application
+    }
+    if let Geometry::Dimension(d) = &mut geometry {
+        // A null handle (zero) names nothing.
+        let mut next = || -> Result<Option<u64>, ObjectError> {
+            Ok(h.handle()?.resolve(common.handle).filter(|&v| v != 0))
+        };
+        d.style = next()?;
+        d.block = next()?;
     }
     if let Geometry::Insert(insert) = &mut geometry {
         insert.block = h
