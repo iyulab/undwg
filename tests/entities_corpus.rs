@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 use undwg::{
     read_block_header, read_block_name, read_classes, read_dimstyle_name, read_directory,
-    read_entity, read_entity_with_classes, read_header, read_layer, read_linetype_name,
-    read_object_frame, read_object_map, read_section, FileHeader, Geometry, HatchEdge, TextValue,
-    Version,
+    read_entity, read_entity_with_classes, read_header, read_image_definition, read_layer,
+    read_linetype_name, read_object_frame, read_object_map, read_section, FileHeader, Geometry,
+    HatchEdge, TextValue, Version,
 };
 
 /// A text as the dump writes it: `U:` and the hex of its UTF-8 for Unicode
@@ -121,6 +121,7 @@ fn every_real_line_circle_and_arc_reads() {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize,
     );
     let mut named_blocks = 0usize;
+    let mut unsupported_images = 0usize;
     let mut references_checked = 0usize;
     for path in &files {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -164,6 +165,12 @@ fn every_real_line_circle_and_arc_reads() {
                     && classes
                         .iter()
                         .any(|c| i32::from(c.number) == i32::from(code) && c.dxf_name == "HATCH"))
+        };
+        let is_class = |code: u16, name: &str| {
+            code >= 500
+                && classes
+                    .iter()
+                    .any(|c| i32::from(c.number) == i32::from(code) && c.dxf_name == name)
         };
         let entries = read_object_map(&handles)
             .unwrap_or_else(|e| panic!("{}: object map: {e}", path.display()));
@@ -293,6 +300,38 @@ fn every_real_line_circle_and_arc_reads() {
                 .unwrap();
             }
         }
+        // Every image definition; written to the dump once per file.
+        let image_definitions: std::collections::BTreeMap<u64, undwg::ImageDefinition> = entries
+            .iter()
+            .filter(|e| e.offset < objects.len() as u64)
+            .filter_map(
+                |e| match read_image_definition(&objects, *e, version, &classes) {
+                    Ok(Some(d)) => Some((e.handle, d)),
+                    Ok(None) => None,
+                    Err(err) => panic!(
+                        "{}: image definition {:#x}: {err}",
+                        path.display(),
+                        e.handle
+                    ),
+                },
+            )
+            .collect();
+        for d in image_definitions.values() {
+            if let Some(out) = dump.as_mut() {
+                writeln!(
+                    out,
+                    "{}\t{:X}\tIMAGEDEF\t{:?}\t{:?}\t{}\t{}\t{:?}",
+                    path.display(),
+                    d.handle,
+                    text_hex(&d.file_path),
+                    d.size,
+                    u8::from(d.loaded),
+                    d.resolution_unit,
+                    d.pixel_size
+                )
+                .unwrap();
+            }
+        }
         // The vertices of 2D and 3D polylines, by handle, with the owner each states.
         let mut vertices_2d = std::collections::BTreeMap::new();
         let mut vertices_3d = std::collections::BTreeMap::new();
@@ -333,6 +372,7 @@ fn every_real_line_circle_and_arc_reads() {
                 continue;
             };
             if !is_hatch(frame.type_code)
+                && !is_class(frame.type_code, "IMAGE")
                 && !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 34 | 40 | 41 | 44 | 46 | 77)
             {
                 continue;
@@ -344,6 +384,10 @@ fn every_real_line_circle_and_arc_reads() {
                     path.display(),
                     frame.type_code
                 ),
+                Err(e) if e.to_string().contains("a raster image of R2010 and later") => {
+                    unsupported_images += 1;
+                    continue;
+                }
                 Err(e) => {
                     failed += 1;
                     if failed <= 8 {
@@ -899,6 +943,39 @@ fn every_real_line_circle_and_arc_reads() {
                     let flat: Vec<f64> = f.corners.iter().flatten().copied().collect();
                     format!("3DFACE\t{:?}\t{:?}", flat, f.invisible_edges)
                 }
+                Geometry::Image(i) => {
+                    assert!(
+                        finite(&i.insertion)
+                            && finite(&i.u_vector)
+                            && finite(&i.v_vector)
+                            && finite(&i.size),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    let definition = i.definition.unwrap_or(0);
+                    assert!(
+                        image_definitions.contains_key(&definition),
+                        "{}: {:#x}: the image has no definition",
+                        path.display(),
+                        entry.handle
+                    );
+                    format!(
+                        "IMAGE\t{:?}\t{:?}\t{:?}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}",
+                        i.insertion,
+                        i.u_vector,
+                        i.v_vector,
+                        i.size,
+                        i.display_flags,
+                        u8::from(i.clipping),
+                        i.brightness,
+                        i.contrast,
+                        i.fade,
+                        i.clip_type,
+                        i.clip_boundary,
+                        format!("{definition:X}")
+                    )
+                }
                 Geometry::Viewport(v) => {
                     assert!(
                         finite(&v.center)
@@ -993,6 +1070,7 @@ fn every_real_line_circle_and_arc_reads() {
     eprintln!(
         "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces, {texts} texts, {attributes} attributes and definitions, {mtexts} multiline texts, {dimensions} dimensions, {splines} splines, {polylines_2d} 2D and {polylines_3d} 3D polylines with {vertices} vertices, {others} traces, rays, infinite lines and tolerances, {hatches} hatches read ({named_blocks} insertions with a block name); {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
+    eprintln!("{unsupported_images} raster images of R2010 and later are not read yet");
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");
 }

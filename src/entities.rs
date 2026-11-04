@@ -31,6 +31,7 @@ pub const TYPE_TEXT: u16 = 1;
 /// A type code no object has: it stands for hatches, which have no fixed type
 /// code of their own but are named by a class of the drawing.
 const TYPE_HATCH: u16 = 0x7001;
+const TYPE_IMAGE: u16 = 0x7002;
 
 /// The type code of a trace.
 pub const TYPE_TRACE: u16 = 32;
@@ -768,6 +769,8 @@ pub enum Geometry {
     Face3d(Face3d),
     /// A viewport.
     Viewport(Viewport),
+    /// A raster image.
+    Image(Image),
 }
 
 /// An entity: its common data and its geometry.
@@ -1896,6 +1899,13 @@ pub fn read_entity_with_classes(
     {
         frame.type_code = TYPE_HATCH;
     }
+    if frame.type_code >= 500
+        && classes
+            .iter()
+            .any(|c| i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "IMAGE")
+    {
+        frame.type_code = TYPE_IMAGE;
+    }
     if !matches!(
         frame.type_code,
         TYPE_ARC
@@ -1924,6 +1934,7 @@ pub fn read_entity_with_classes(
                 | TYPE_SOLID
                 | TYPE_3DFACE
                 | TYPE_VIEWPORT
+                | TYPE_IMAGE
     ) {
         return Ok(None);
     }
@@ -2010,6 +2021,7 @@ pub fn read_entity_with_classes(
         TYPE_ELLIPSE => Geometry::Ellipse(read_ellipse(&mut r)?),
         TYPE_SOLID => Geometry::Solid(read_solid(&mut r)?),
         TYPE_3DFACE => Geometry::Face3d(read_face3d(&mut r)?),
+        TYPE_IMAGE => Geometry::Image(read_image(&mut r, version)?),
         TYPE_VIEWPORT => {
             let (viewport, frozen) = read_viewport(&mut r, &mut strings, version)?;
             frozen_layer_count = frozen;
@@ -2101,6 +2113,10 @@ pub fn read_entity_with_classes(
             next()?; // the shade plot object
             next()?; // the sun
         }
+    }
+    if let Geometry::Image(i) = &mut geometry {
+        i.definition = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
+        i.reactor = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
     }
     if let Geometry::Dimension(d) = &mut geometry {
         // A null handle (zero) names nothing.
@@ -2300,4 +2316,94 @@ fn read_viewport(
         },
         frozen,
     ))
+}
+
+/// A raster image: a picture placed in the drawing. The picture itself is
+/// named by an image definition (a separate object).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Image {
+    /// The class version.
+    pub class_version: i32,
+    /// The insertion point (the lower left corner of the picture).
+    pub insertion: [f64; 3],
+    /// The vector along one pixel row, the length of one pixel.
+    pub u_vector: [f64; 3],
+    /// The vector along one pixel column, the length of one pixel.
+    pub v_vector: [f64; 3],
+    /// The size of the picture in pixels.
+    pub size: [f64; 2],
+    /// The display properties: show image `1`, show when not aligned with
+    /// the screen `2`, use the clipping boundary `4`, transparency on `8`.
+    pub display_flags: i16,
+    /// The image is clipped.
+    pub clipping: bool,
+    /// The brightness, 0 to 100.
+    pub brightness: u8,
+    /// The contrast, 0 to 100.
+    pub contrast: u8,
+    /// The fade, 0 to 100.
+    pub fade: u8,
+    /// Whether the clip keeps what is inside the boundary (R2010 and later).
+    pub clip_inside: Option<bool>,
+    /// The boundary type: `1` a rectangle (two corners), `2` a polygon.
+    pub clip_type: i16,
+    /// The clip boundary points, in pixel coordinates.
+    pub clip_boundary: Vec<[f64; 2]>,
+    /// The image definition.
+    pub definition: Option<u64>,
+    /// The image definition reactor.
+    pub reactor: Option<u64>,
+}
+
+fn read_image(r: &mut BitReader<'_>, version: Version) -> Result<Image, BitError> {
+    // From R2010 about 150 bytes precede the class version in the files seen (the
+    // clip polygon appears in them); what they are is not understood yet, and
+    // reading on from there would give wrong numbers.
+    if version >= Version::R2010 {
+        return Err(BitError::Unsupported {
+            form: "a raster image of R2010 and later",
+        });
+    }
+    let class_version = r.bit_long()?;
+    let insertion = r.point_3bd()?;
+    let u_vector = r.point_3bd()?;
+    let v_vector = r.point_3bd()?;
+    let size = [r.raw_double()?, r.raw_double()?];
+    let display_flags = r.bit_short()?;
+    let clipping = r.bit()?;
+    let brightness = r.raw_char()?;
+    let contrast = r.raw_char()?;
+    let fade = r.raw_char()?;
+    let clip_inside = if version >= Version::R2010 {
+        Some(r.bit()?)
+    } else {
+        None
+    };
+    let clip_type = r.bit_short()?;
+    let count = if clip_type == 1 {
+        2
+    } else {
+        bounded_count(r, "image clip vertex count")?
+    };
+    let mut clip_boundary = Vec::with_capacity(count);
+    for _ in 0..count {
+        clip_boundary.push([r.raw_double()?, r.raw_double()?]);
+    }
+    Ok(Image {
+        class_version,
+        insertion,
+        u_vector,
+        v_vector,
+        size,
+        display_flags,
+        clipping,
+        brightness,
+        contrast,
+        fade,
+        clip_inside,
+        clip_type,
+        clip_boundary,
+        definition: None,
+        reactor: None,
+    })
 }

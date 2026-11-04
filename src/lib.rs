@@ -34,9 +34,9 @@ pub use classes::{read_classes, ClassDef, ClassError};
 pub use entities::{
     read_entity, read_entity_with_classes, Arc, Attribute, Circle, CommonEntity, Dimension,
     DimensionKind, Ellipse, Entity, Face3d, Geometry, Hatch, HatchEdge, HatchPath,
-    HatchPatternLine, InfiniteLine, Insert, Line, LwPolyline, LwVertex, Mtext, Point, Polyline2d,
-    Polyline3d, References, Solid, Spline, Text, Tolerance, Vertex2d, Vertex3d, Viewport,
-    TYPE_3DFACE, TYPE_ARC, TYPE_ATTDEF, TYPE_ATTRIB, TYPE_CIRCLE, TYPE_DIMENSION_ALIGNED,
+    HatchPatternLine, Image, InfiniteLine, Insert, Line, LwPolyline, LwVertex, Mtext, Point,
+    Polyline2d, Polyline3d, References, Solid, Spline, Text, Tolerance, Vertex2d, Vertex3d,
+    Viewport, TYPE_3DFACE, TYPE_ARC, TYPE_ATTDEF, TYPE_ATTRIB, TYPE_CIRCLE, TYPE_DIMENSION_ALIGNED,
     TYPE_DIMENSION_ANGULAR_2LINE, TYPE_DIMENSION_ANGULAR_3POINT, TYPE_DIMENSION_DIAMETER,
     TYPE_DIMENSION_LINEAR, TYPE_DIMENSION_ORDINATE, TYPE_DIMENSION_RADIUS, TYPE_ELLIPSE,
     TYPE_INSERT, TYPE_LINE, TYPE_LWPOLYLINE, TYPE_MTEXT, TYPE_POINT, TYPE_POLYLINE_2D,
@@ -54,7 +54,8 @@ pub use sections::{
     SectionDirectory, SectionError, SectionPage,
 };
 pub use tables::{
-    read_block_header, read_block_name, read_dimstyle_name, read_layer, read_linetype_name,
-    BlockHeader, Layer, TableColor, TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE,
+    read_block_header, read_block_name, read_dimstyle_name, read_image_definition, read_layer,
+    read_linetype_name, BlockHeader, ImageDefinition, Layer, TableColor, TYPE_BLOCK_HEADER,
+    TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE,
 };
 pub use version::{detect_version, Error, Unsupported, Version};

@@ -5,6 +5,7 @@
 //! is checked.
 
 use crate::bits::{BitError, BitReader, TextValue};
+use crate::classes::ClassDef;
 use crate::objects::{open_object, skip_extended_data, Layout, ObjectEntry, ObjectError};
 use crate::version::Version;
 
@@ -74,16 +75,24 @@ struct Opened<'a> {
     name: TextValue,
 }
 
-/// Opens the table entry at `entry` and reads the data every object has, then
-/// the name. `Ok(None)` when the object is of another kind.
-fn open_entry<'a>(
+/// The data every object has, read: the reader positioned after it.
+struct Prefix<'a> {
+    r: BitReader<'a>,
+    layout: Layout,
+    reactors: i32,
+    xdictionary_stored: bool,
+}
+
+/// Opens the object at `entry` and reads the data every object has, when its
+/// type code is `type_code`; `Ok(None)` for another kind.
+fn open_prefix<'a>(
     objects: &'a [u8],
     entry: ObjectEntry,
     version: Version,
-    type_code: u16,
-) -> Result<Option<Opened<'a>>, ObjectError> {
+    accepts: impl Fn(u16) -> bool,
+) -> Result<Option<Prefix<'a>>, ObjectError> {
     let (frame, mut r, layout) = open_object(objects, entry, version)?;
-    if frame.type_code != type_code {
+    if !accepts(frame.type_code) {
         return Ok(None);
     }
     if version < Version::R2010 {
@@ -100,6 +109,31 @@ fn open_entry<'a>(
     if version >= Version::R2013 {
         r.bit()?; // binary data is kept in the data store
     }
+    Ok(Some(Prefix {
+        r,
+        layout,
+        reactors,
+        xdictionary_stored,
+    }))
+}
+
+/// Opens the table entry at `entry` and reads the data every object has, then
+/// the name. `Ok(None)` when the object is of another kind.
+fn open_entry<'a>(
+    objects: &'a [u8],
+    entry: ObjectEntry,
+    version: Version,
+    type_code: u16,
+) -> Result<Option<Opened<'a>>, ObjectError> {
+    let Some(Prefix {
+        mut r,
+        layout,
+        reactors,
+        xdictionary_stored,
+    }) = open_prefix(objects, entry, version, |code| code == type_code)?
+    else {
+        return Ok(None);
+    };
     let mut strings = layout.strings.map(|(from, _)| {
         let mut s = r.clone();
         s.seek(from);
@@ -387,6 +421,88 @@ pub fn read_block_header(
         base_point,
         xref_path,
         description,
+        owner,
+    }))
+}
+
+/// An image definition: the file a raster image shows and how big its pixels
+/// are. Raster images name it by handle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageDefinition {
+    /// The definition's handle.
+    pub handle: u64,
+    /// The class version.
+    pub class_version: i32,
+    /// The size of the picture in pixels.
+    pub size: [f64; 2],
+    /// The path of the picture file.
+    pub file_path: TextValue,
+    /// Whether the picture is loaded.
+    pub loaded: bool,
+    /// The resolution units: `0` none, `2` centimetres, `5` inches.
+    pub resolution_unit: u8,
+    /// The size of one pixel in drawing units.
+    pub pixel_size: [f64; 2],
+    /// The object that owns the definition.
+    pub owner: Option<u64>,
+}
+
+/// Reads the image definition at `entry`, an object of the class named
+/// `IMAGEDEF` in `classes`; `Ok(None)` when the object is of another kind.
+pub fn read_image_definition(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+    classes: &[ClassDef],
+) -> Result<Option<ImageDefinition>, ObjectError> {
+    let is_definition = |code: u16| {
+        code >= 500
+            && classes
+                .iter()
+                .any(|c| i32::from(c.number) == i32::from(code) && c.dxf_name == "IMAGEDEF")
+    };
+    let Some(Prefix {
+        mut r,
+        layout,
+        reactors,
+        xdictionary_stored,
+    }) = open_prefix(objects, entry, version, is_definition)?
+    else {
+        return Ok(None);
+    };
+    let mut strings = layout.strings.map(|(from, _)| {
+        let mut s = r.clone();
+        s.seek(from);
+        s
+    });
+    let class_version = r.bit_long()?;
+    let size = [r.raw_double()?, r.raw_double()?];
+    let file_path = text_value(&mut r, &mut strings)?;
+    let loaded = r.bit()?;
+    let resolution_unit = r.raw_char()?;
+    let pixel_size = [r.raw_double()?, r.raw_double()?];
+    if r.position() != layout.main_end {
+        return Err(ObjectError::Unexpected {
+            what: "image definition main data length",
+        });
+    }
+    let opened = Opened {
+        r,
+        layout,
+        strings,
+        reactors,
+        xdictionary_stored,
+        name: TextValue::Ansi(Vec::new()),
+    };
+    let (_, owner) = opened.handles(entry.handle)?;
+    Ok(Some(ImageDefinition {
+        handle: entry.handle,
+        class_version,
+        size,
+        file_path,
+        loaded,
+        resolution_unit,
+        pixel_size,
         owner,
     }))
 }
