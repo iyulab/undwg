@@ -76,6 +76,23 @@ pub struct HandleRef {
     pub value: u64,
 }
 
+impl HandleRef {
+    /// The handle this reference names, given the handle of the object that
+    /// holds it. Codes 2 to 5 are absolute; 6 and 8 are the holder's handle
+    /// plus and minus one; 10 and 12 add and subtract the value. Any other
+    /// code, or an outcome below zero, names nothing.
+    pub fn resolve(self, holder: u64) -> Option<u64> {
+        match self.code {
+            2..=5 => Some(self.value),
+            6 => holder.checked_add(1),
+            8 => holder.checked_sub(1),
+            10 => holder.checked_add(self.value),
+            12 => holder.checked_sub(self.value),
+            _ => None,
+        }
+    }
+}
+
 /// A cursor over bit-coded data.
 #[derive(Debug, Clone)]
 pub struct BitReader<'a> {
@@ -649,5 +666,19 @@ mod tests {
         assert!(r.bit().unwrap());
         assert_eq!(r.raw_short().unwrap(), 0x1234);
         assert_eq!(r.position(), 17);
+    }
+
+    #[test]
+    fn handle_references_resolve_against_the_holder() {
+        let at = |code, value| HandleRef { code, value }.resolve(0x100);
+        assert_eq!(at(4, 0x20), Some(0x20));
+        assert_eq!(at(5, 0x20), Some(0x20));
+        assert_eq!(at(6, 0), Some(0x101));
+        assert_eq!(at(8, 0), Some(0xFF));
+        assert_eq!(at(10, 0x10), Some(0x110));
+        assert_eq!(at(12, 0x10), Some(0xF0));
+        // below zero and unknown codes name nothing
+        assert_eq!(at(12, 0x200), None);
+        assert_eq!(at(7, 1), None);
     }
 }

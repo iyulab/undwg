@@ -66,6 +66,7 @@ fn every_real_line_circle_and_arc_reads() {
         mut faces,
         mut failed,
     ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0usize);
+    let mut references_checked = 0usize;
     for path in &files {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let (version, handles, objects): (Version, Vec<u8>, Vec<u8>) = match read_header(&bytes) {
@@ -93,6 +94,17 @@ fn every_real_line_circle_and_arc_reads() {
         let entries = read_object_map(&handles)
             .unwrap_or_else(|e| panic!("{}: object map: {e}", path.display()));
         files_read += 1;
+        // The type of every object whose frame holds, to check what the
+        // references of an entity point at.
+        let types: std::collections::BTreeMap<u64, u16> = entries
+            .iter()
+            .filter(|e| e.offset < objects.len() as u64)
+            .filter_map(|e| {
+                read_object_frame(&objects, *e, version)
+                    .ok()
+                    .map(|f| (e.handle, f.type_code))
+            })
+            .collect();
         for entry in &entries {
             if entry.offset >= objects.len() as u64 {
                 continue;
@@ -123,6 +135,32 @@ fn every_real_line_circle_and_arc_reads() {
                     continue;
                 }
             };
+            // What the entity points at must be an object of the right kind:
+            // a layer, a block header, a dictionary, a linetype.
+            let refs = &entity.references;
+            let expect = |handle: u64, code: u16, what: &str| {
+                assert_eq!(
+                    types.get(&handle),
+                    Some(&code),
+                    "{}: {:#x}: {what} {handle:#x}",
+                    path.display(),
+                    entry.handle
+                );
+            };
+            expect(refs.layer, 51, "layer");
+            if let Some(owner) = refs.owner {
+                expect(owner, 49, "owner");
+            }
+            if let Some(x) = refs.xdictionary {
+                expect(x, 42, "extension dictionary");
+            }
+            if let Some(l) = refs.linetype {
+                expect(l, 57, "linetype");
+            }
+            if let Geometry::Insert(i) = &entity.geometry {
+                expect(i.block, 49, "inserted block");
+            }
+            references_checked += 1;
             let name = match &entity.geometry {
                 Geometry::Line(l) => {
                     lines += 1;
@@ -277,7 +315,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces read; {failed} unreadable"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses, {solids} solids, {faces} 3D faces read; {failed} unreadable; {references_checked} entities' references point at objects of the right kind"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");

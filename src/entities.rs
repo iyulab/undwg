@@ -7,8 +7,11 @@
 //! polylines, block insertions, solids and 3D faces. Any other kind is left
 //! alone (`Ok(None)`), never guessed at.
 //!
-//! Only the main bit stream is read; the strings and handle references that
-//! later versions keep in separate streams are not needed for geometry.
+//! An object's data is laid out in streams that follow one another: the main
+//! stream, then (from R2007) the strings, then the handle references. The
+//! main stream and the handle stream are read here; a kind's fields must fill
+//! the main stream exactly and the handles must reach the end of the data,
+//! which is what makes a wrongly positioned read show up.
 
 use crate::bits::{BitError, BitReader};
 use crate::objects::{open_object, ObjectEntry, ObjectError};
@@ -169,6 +172,13 @@ pub struct Insert {
     pub extrusion: [f64; 3],
     /// Whether attributes follow the insertion.
     pub has_attributes: bool,
+    /// The handle of the block header the insertion inserts.
+    pub block: u64,
+    /// The attributes that follow (R2000 names the first and the last; later
+    /// versions name them all).
+    pub attributes: Vec<u64>,
+    /// The handle of the sequence end that closes the attributes.
+    pub sequence_end: Option<u64>,
 }
 
 /// One vertex of a lightweight polyline.
@@ -206,6 +216,38 @@ pub struct LwPolyline {
     pub vertices: Vec<LwVertex>,
 }
 
+/// The objects an entity points to, from its handle stream. Every handle is
+/// absolute; a reference that names nothing (a null handle) is `None`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct References {
+    /// The owner (the block the entity lives in), stated when the entity is not
+    /// simply in model or paper space.
+    pub owner: Option<u64>,
+    /// The persistent reactors.
+    pub reactors: Vec<u64>,
+    /// The extension dictionary.
+    pub xdictionary: Option<u64>,
+    /// The layer.
+    pub layer: u64,
+    /// The linetype, when the entity has one of its own.
+    pub linetype: Option<u64>,
+    /// The material, when the entity has one of its own.
+    pub material: Option<u64>,
+    /// The plot style, when the entity has one of its own.
+    pub plotstyle: Option<u64>,
+}
+
+/// What the main stream says about the handles that follow.
+#[derive(Debug, Clone, Copy)]
+struct HandleFlags {
+    xdictionary_stored: bool,
+    links_stored: bool,
+    material_stored: bool,
+    full_style: bool,
+    face_style: bool,
+    edge_style: bool,
+}
+
 /// The geometry of an entity of a kind this reader reads.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -237,11 +279,16 @@ pub struct Entity {
     pub common: CommonEntity,
     /// The entity's own fields.
     pub geometry: Geometry,
+    /// The objects the entity points to.
+    pub references: References,
 }
 
 /// Reads the common entity data. The reader is positioned just after the
 /// object type.
-fn read_common(r: &mut BitReader<'_>, version: Version) -> Result<CommonEntity, BitError> {
+fn read_common(
+    r: &mut BitReader<'_>,
+    version: Version,
+) -> Result<(CommonEntity, HandleFlags), BitError> {
     let before_r2010 = version < Version::R2010;
     if before_r2010 {
         // The size of the object data in bits, not counting the handles.
@@ -281,15 +328,15 @@ fn read_common(r: &mut BitReader<'_>, version: Version) -> Result<CommonEntity, 
 
     let entity_mode = r.bits(2)? as u8;
     let reactor_count = r.bit_long()?;
-    if version >= Version::R2004 {
-        r.bit()?; // no extension dictionary handle is stored
-    }
+    // Before R2004 an extension dictionary reference is always stored; from
+    // R2004 a bit says it is not.
+    let xdictionary_stored = version < Version::R2004 || !r.bit()?;
     if version >= Version::R2013 {
         r.bit()?; // binary data is kept in the data store
     }
-    if version < Version::R2004 {
-        r.bit()?; // no previous/next links (from R2004 the flag is implied, not stored)
-    }
+    // Before R2004 a bit says the previous and next entities are not stored; from
+    // R2004 they never are.
+    let links_stored = version < Version::R2004 && !r.bit()?;
 
     let color = if version >= Version::R2004 {
         let flags = r.bit_short()? as u16;
@@ -306,28 +353,94 @@ fn read_common(r: &mut BitReader<'_>, version: Version) -> Result<CommonEntity, 
     let linetype_scale = r.bit_double()?;
     let linetype_flags = r.bits(2)? as u8;
     let plotstyle_flags = r.bits(2)? as u8;
+    let mut material_stored = false;
     if version >= Version::R2007 {
-        r.bits(2)?; // material flags
+        material_stored = r.bits(2)? == 3; // material flags: a handle is stored
         r.raw_char()?; // shadow flags
     }
+    let (mut full_style, mut face_style, mut edge_style) = (false, false, false);
     if version >= Version::R2010 {
-        r.bit()?; // has a full visual style
-        r.bit()?; // has a face visual style
-        r.bit()?; // has an edge visual style
+        full_style = r.bit()?;
+        face_style = r.bit()?;
+        edge_style = r.bit()?;
     }
     let invisible = r.bit_short()?;
     let lineweight = r.raw_char()?;
-    Ok(CommonEntity {
-        handle,
-        entity_mode,
-        reactor_count,
-        color,
-        linetype_scale,
-        linetype_flags,
-        plotstyle_flags,
-        invisible,
-        lineweight,
-    })
+    Ok((
+        CommonEntity {
+            handle,
+            entity_mode,
+            reactor_count,
+            color,
+            linetype_scale,
+            linetype_flags,
+            plotstyle_flags,
+            invisible,
+            lineweight,
+        },
+        HandleFlags {
+            xdictionary_stored,
+            links_stored,
+            material_stored,
+            full_style,
+            face_style,
+            edge_style,
+        },
+    ))
+}
+
+/// Reads the handle stream that every entity has: the references of the
+/// common data, in the order the format gives them. The reader is positioned
+/// at the start of the handle stream.
+fn read_references(
+    h: &mut BitReader<'_>,
+    common: &CommonEntity,
+    flags: HandleFlags,
+) -> Result<References, ObjectError> {
+    let holder = common.handle;
+    let next = |h: &mut BitReader<'_>| -> Result<Option<u64>, ObjectError> {
+        Ok(h.handle()?.resolve(holder).filter(|&v| v != 0))
+    };
+    let mut refs = References::default();
+    if common.entity_mode == 0 {
+        refs.owner = next(h)?;
+    }
+    let reactors = usize::try_from(common.reactor_count)
+        .ok()
+        .filter(|&n| n <= h.remaining() / 8)
+        .ok_or(ObjectError::Unexpected {
+            what: "reactor count",
+        })?;
+    for _ in 0..reactors {
+        if let Some(v) = next(h)? {
+            refs.reactors.push(v);
+        }
+    }
+    if flags.xdictionary_stored {
+        refs.xdictionary = next(h)?;
+    }
+    if flags.links_stored {
+        next(h)?; // the previous entity
+        next(h)?; // the next entity
+    }
+    refs.layer = next(h)?.ok_or(ObjectError::Unexpected {
+        what: "layer handle",
+    })?;
+    if common.linetype_flags == 3 {
+        refs.linetype = next(h)?;
+    }
+    if flags.material_stored {
+        refs.material = next(h)?;
+    }
+    if common.plotstyle_flags == 3 {
+        refs.plotstyle = next(h)?;
+    }
+    for stored in [flags.full_style, flags.face_style, flags.edge_style] {
+        if stored {
+            next(h)?; // a visual style
+        }
+    }
+    Ok(refs)
 }
 
 fn read_line(r: &mut BitReader<'_>) -> Result<Line, BitError> {
@@ -506,7 +619,9 @@ fn read_ellipse(r: &mut BitReader<'_>) -> Result<Ellipse, BitError> {
     })
 }
 
-fn read_insert(r: &mut BitReader<'_>) -> Result<Insert, BitError> {
+/// Reads the main-stream fields of a block insertion; the second value is the
+/// count of attributes it owns (R2004 and later), which the handle stream lists.
+fn read_insert(r: &mut BitReader<'_>, version: Version) -> Result<(Insert, usize), BitError> {
     let position = r.point_3bd()?;
     // How the scale is stored: all ones, a value with the other two defaulted
     // to one, one value for all three, or one value and two defaulting to it.
@@ -530,13 +645,27 @@ fn read_insert(r: &mut BitReader<'_>) -> Result<Insert, BitError> {
             ]
         }
     };
-    Ok(Insert {
-        position,
-        scale,
-        rotation: r.bit_double()?,
-        extrusion: r.point_3bd()?,
-        has_attributes: r.bit()?,
-    })
+    let rotation = r.bit_double()?;
+    let extrusion = r.point_3bd()?;
+    let has_attributes = r.bit()?;
+    let owned = if has_attributes && version >= Version::R2004 {
+        bounded_count(r, "attribute count")?
+    } else {
+        0
+    };
+    Ok((
+        Insert {
+            position,
+            scale,
+            rotation,
+            extrusion,
+            has_attributes,
+            block: 0,
+            attributes: Vec::new(),
+            sequence_end: None,
+        },
+        owned,
+    ))
 }
 
 fn read_point(r: &mut BitReader<'_>) -> Result<Point, BitError> {
@@ -560,7 +689,7 @@ pub fn read_entity(
     entry: ObjectEntry,
     version: Version,
 ) -> Result<Option<Entity>, ObjectError> {
-    let (frame, mut r) = open_object(objects, entry, version)?;
+    let (frame, mut r, layout) = open_object(objects, entry, version)?;
     if !matches!(
         frame.type_code,
         TYPE_ARC
@@ -575,22 +704,64 @@ pub fn read_entity(
     ) {
         return Ok(None);
     }
-    let common = read_common(&mut r, version)?;
+    let (common, flags) = read_common(&mut r, version)?;
     if common.handle != entry.handle {
         return Err(ObjectError::Unexpected {
             what: "entity handle",
         });
     }
-    let geometry = match frame.type_code {
+    let mut owned = 0;
+    let mut geometry = match frame.type_code {
         TYPE_LINE => Geometry::Line(read_line(&mut r)?),
         TYPE_POINT => Geometry::Point(read_point(&mut r)?),
         TYPE_CIRCLE => Geometry::Circle(read_circle(&mut r)?),
         TYPE_LWPOLYLINE => Geometry::LwPolyline(read_lwpolyline(&mut r, version)?),
-        TYPE_INSERT => Geometry::Insert(read_insert(&mut r)?),
+        TYPE_INSERT => {
+            let (insert, count) = read_insert(&mut r, version)?;
+            owned = count;
+            Geometry::Insert(insert)
+        }
         TYPE_ELLIPSE => Geometry::Ellipse(read_ellipse(&mut r)?),
         TYPE_SOLID => Geometry::Solid(read_solid(&mut r)?),
         TYPE_3DFACE => Geometry::Face3d(read_face3d(&mut r)?),
         _ => Geometry::Arc(read_arc(&mut r)?),
     };
-    Ok(Some(Entity { common, geometry }))
+    // The fields must fill the main stream exactly: a kind that stops short or
+    // runs over was read wrongly, whatever values it produced.
+    if r.position() != layout.main_end {
+        return Err(ObjectError::Unexpected {
+            what: "entity data length",
+        });
+    }
+    let mut h = r.clone();
+    h.seek(layout.handle_start);
+    let references = read_references(&mut h, &common, flags)?;
+    if let Geometry::Insert(insert) = &mut geometry {
+        insert.block = h
+            .handle()?
+            .resolve(common.handle)
+            .ok_or(ObjectError::Unexpected {
+                what: "block handle",
+            })?;
+        if insert.has_attributes {
+            let listed = if version >= Version::R2004 { owned } else { 2 };
+            for _ in 0..listed {
+                if let Some(v) = h.handle()?.resolve(common.handle) {
+                    insert.attributes.push(v);
+                }
+            }
+            insert.sequence_end = h.handle()?.resolve(common.handle);
+        }
+    }
+    // The handle stream runs to the end of the object's data, padded to a byte.
+    if layout.end.saturating_sub(h.position()) >= 8 {
+        return Err(ObjectError::Unexpected {
+            what: "handle stream length",
+        });
+    }
+    Ok(Some(Entity {
+        common,
+        geometry,
+        references,
+    }))
 }
