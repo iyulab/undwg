@@ -31,8 +31,8 @@ mod version;
 pub use bits::{BitError, BitReader, EndOfData, HandleRef};
 pub use classes::{read_classes, ClassDef, ClassError};
 pub use entities::{
-    read_entity, Arc, Circle, CommonEntity, Entity, Geometry, Line, LwPolyline, LwVertex, Point,
-    TYPE_ARC, TYPE_CIRCLE, TYPE_LINE, TYPE_LWPOLYLINE, TYPE_POINT,
+    read_entity, Arc, Circle, CommonEntity, Entity, Geometry, Insert, Line, LwPolyline, LwVertex,
+    Point, TYPE_ARC, TYPE_CIRCLE, TYPE_INSERT, TYPE_LINE, TYPE_LWPOLYLINE, TYPE_POINT,
 };
 pub use header::{
     read_header, FileHeader, HeaderError, HeaderR2000, HeaderR2004, SectionLocator,

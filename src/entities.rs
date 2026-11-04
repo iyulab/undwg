@@ -3,8 +3,8 @@
 //! An entity begins with data every entity has -- its handle, extended data,
 //! a flag for a stored graphic, colour, linetype scale and so on -- and then
 //! the fields of its own kind. This module reads the common data and the
-//! simplest kinds: lines, circles, arcs, points and lightweight polylines.
-//! Any other kind is left
+//! simplest kinds: lines, circles, arcs, points, lightweight polylines and
+//! block insertions. Any other kind is left
 //! alone (`Ok(None)`), never guessed at.
 //!
 //! Only the main bit stream is read; the strings and handle references that
@@ -22,6 +22,8 @@ pub const TYPE_CIRCLE: u16 = 18;
 pub const TYPE_LINE: u16 = 19;
 /// The type code of a point.
 pub const TYPE_POINT: u16 = 27;
+/// The type code of a block insertion.
+pub const TYPE_INSERT: u16 = 7;
 /// The type code of a lightweight polyline.
 pub const TYPE_LWPOLYLINE: u16 = 77;
 
@@ -105,6 +107,22 @@ pub struct Point {
     pub x_axis_angle: f64,
 }
 
+/// A block insertion. The block it inserts is named by a handle in the
+/// object's handle stream, which this reader does not read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Insert {
+    /// The insertion point.
+    pub position: [f64; 3],
+    /// The scale along each axis.
+    pub scale: [f64; 3],
+    /// The rotation, in radians.
+    pub rotation: f64,
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// Whether attributes follow the insertion.
+    pub has_attributes: bool,
+}
+
 /// One vertex of a lightweight polyline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LwVertex {
@@ -154,6 +172,8 @@ pub enum Geometry {
     Point(Point),
     /// A lightweight polyline.
     LwPolyline(LwPolyline),
+    /// A block insertion.
+    Insert(Insert),
 }
 
 /// An entity: its common data and its geometry.
@@ -381,6 +401,39 @@ fn read_lwpolyline(r: &mut BitReader<'_>, version: Version) -> Result<LwPolyline
     })
 }
 
+fn read_insert(r: &mut BitReader<'_>) -> Result<Insert, BitError> {
+    let position = r.point_3bd()?;
+    // How the scale is stored: all ones, a value with the other two defaulted
+    // to one, one value for all three, or one value and two defaulting to it.
+    let scale = match r.bits(2)? {
+        3 => [1.0, 1.0, 1.0],
+        1 => [
+            1.0,
+            r.bit_double_with_default(1.0)?,
+            r.bit_double_with_default(1.0)?,
+        ],
+        2 => {
+            let x = r.raw_double()?;
+            [x, x, x]
+        }
+        _ => {
+            let x = r.raw_double()?;
+            [
+                x,
+                r.bit_double_with_default(x)?,
+                r.bit_double_with_default(x)?,
+            ]
+        }
+    };
+    Ok(Insert {
+        position,
+        scale,
+        rotation: r.bit_double()?,
+        extrusion: r.point_3bd()?,
+        has_attributes: r.bit()?,
+    })
+}
+
 fn read_point(r: &mut BitReader<'_>) -> Result<Point, BitError> {
     Ok(Point {
         position: r.point_3bd()?,
@@ -390,8 +443,8 @@ fn read_point(r: &mut BitReader<'_>) -> Result<Point, BitError> {
     })
 }
 
-/// Reads the entity at `entry` if it is a line, a circle, an arc, a point or a
-/// lightweight polyline;
+/// Reads the entity at `entry` if it is a line, a circle, an arc, a point, a
+/// lightweight polyline or a block insertion;
 /// `Ok(None)` for any other kind of object.
 ///
 /// `objects` is the assembled `AcDb:AcDbObjects` section (for R2000 the
@@ -405,7 +458,7 @@ pub fn read_entity(
     let (frame, mut r) = open_object(objects, entry, version)?;
     if !matches!(
         frame.type_code,
-        TYPE_ARC | TYPE_CIRCLE | TYPE_LINE | TYPE_POINT | TYPE_LWPOLYLINE
+        TYPE_ARC | TYPE_CIRCLE | TYPE_LINE | TYPE_POINT | TYPE_LWPOLYLINE | TYPE_INSERT
     ) {
         return Ok(None);
     }
@@ -420,6 +473,7 @@ pub fn read_entity(
         TYPE_POINT => Geometry::Point(read_point(&mut r)?),
         TYPE_CIRCLE => Geometry::Circle(read_circle(&mut r)?),
         TYPE_LWPOLYLINE => Geometry::LwPolyline(read_lwpolyline(&mut r, version)?),
+        TYPE_INSERT => Geometry::Insert(read_insert(&mut r)?),
         _ => Geometry::Arc(read_arc(&mut r)?),
     };
     Ok(Some(Entity { common, geometry }))

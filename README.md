@@ -29,6 +29,7 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | Object map and object frames (R2000, R2004 and later; size, type, checksum) | done |
 | Lines, circles, arcs and points (R2000, R2004 and later) | done |
 | Lightweight polylines: vertices, bulges, widths, closed flag, plane (R2000, R2004 and later) | done |
+| Block insertions: point, scale, rotation, extrusion (R2000, R2004 and later; the inserted block's name is a handle and is not read yet) | done |
 | Other entities, tables, blocks, header variables | planned |
 
 Files older than R2000 are an explicit error that names the version bytes it found. Writing DWG is out of scope.
