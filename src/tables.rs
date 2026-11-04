@@ -14,6 +14,8 @@ pub const TYPE_BLOCK_HEADER: u16 = 49;
 
 /// The type code of a layer.
 pub const TYPE_LAYER: u16 = 51;
+/// The type code of a layout.
+pub const TYPE_LAYOUT: u16 = 82;
 /// The type code of a registered application.
 pub const TYPE_APPID: u16 = 67;
 /// The type code of a text style.
@@ -569,6 +571,285 @@ pub fn read_block_header(
         owned_entities,
         first_entity,
         last_entity,
+    }))
+}
+
+/// One line of a multiline style.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MlineElement {
+    /// The offset of the line from the centre line of the multiline.
+    pub offset: f64,
+    /// The colour of the line.
+    pub color: TableColor,
+    /// The index of the line's linetype (before R2018; later files keep a
+    /// handle instead and this is `None`).
+    pub linetype_index: Option<i16>,
+}
+
+/// A multiline style: the lines a multiline is drawn with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MlineStyle {
+    /// The style's handle.
+    pub handle: u64,
+    /// The style name.
+    pub name: TextValue,
+    /// The description.
+    pub description: TextValue,
+    /// The flags, as stored.
+    pub flags: i16,
+    /// The fill colour.
+    pub fill_color: TableColor,
+    /// The angle of the start cap, in radians.
+    pub start_angle: f64,
+    /// The angle of the end cap, in radians.
+    pub end_angle: f64,
+    /// The lines, in the order the style keeps them.
+    pub elements: Vec<MlineElement>,
+}
+
+/// Reads the multiline style at `entry`; `Ok(None)` when the object is of
+/// another kind.
+pub fn read_mline_style(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<Option<MlineStyle>, ObjectError> {
+    let Some(mut o) = open_entry(objects, entry, version, TYPE_MLINESTYLE)? else {
+        return Ok(None);
+    };
+    let description = text_value(&mut o.r, &mut o.strings)?;
+    let flags = o.r.bit_short()?;
+    let fill_color = read_table_color(&mut o.r, &mut o.strings, version)?;
+    let start_angle = o.r.bit_double()?;
+    let end_angle = o.r.bit_double()?;
+    let count = usize::from(o.r.raw_char()?);
+    let mut elements = Vec::with_capacity(count);
+    for _ in 0..count {
+        let offset = o.r.bit_double()?;
+        let color = read_table_color(&mut o.r, &mut o.strings, version)?;
+        let linetype_index = if version < Version::R2018 {
+            Some(o.r.bit_short()?)
+        } else {
+            None
+        };
+        elements.push(MlineElement {
+            offset,
+            color,
+            linetype_index,
+        });
+    }
+    o.check_main_end("multiline style main data length")?;
+    Ok(Some(MlineStyle {
+        handle: entry.handle,
+        name: o.name,
+        description,
+        flags,
+        fill_color,
+        start_angle,
+        end_angle,
+        elements,
+    }))
+}
+
+/// A layout: a tab of the drawing -- model space or one sheet of paper space
+/// -- with its plot settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlotLayout {
+    /// The layout's handle.
+    pub handle: u64,
+    /// The name of the page setup.
+    pub page_setup_name: TextValue,
+    /// The printer or configuration file.
+    pub printer: TextValue,
+    /// The plot layout flags, as stored.
+    pub plot_flags: i16,
+    /// The margins in millimetres: left, bottom, right, top.
+    pub margins: [f64; 4],
+    /// The paper width in millimetres.
+    pub paper_width: f64,
+    /// The paper height in millimetres.
+    pub paper_height: f64,
+    /// The paper size name.
+    pub paper_size: TextValue,
+    /// The plot origin in millimetres.
+    pub plot_origin: [f64; 2],
+    /// The paper units: inches `0`, millimetres `1`, pixels `2`.
+    pub paper_units: i16,
+    /// The plot rotation: none `0`, 90 degrees counter-clockwise `1`, upside down `2`, 90 degrees clockwise `3`.
+    pub plot_rotation: i16,
+    /// What is plotted: last screen display `0`, extents `1`, limits `2`, view `3`, window `4`, layout `5`.
+    pub plot_type: i16,
+    /// The lower corner of the plot window.
+    pub window_min: [f64; 2],
+    /// The upper corner of the plot window.
+    pub window_max: [f64; 2],
+    /// The numerator of the custom print scale.
+    pub scale_numerator: f64,
+    /// The denominator of the custom print scale.
+    pub scale_denominator: f64,
+    /// The current plot style sheet.
+    pub style_sheet: TextValue,
+    /// The standard scale type.
+    pub scale_type: i16,
+    /// The scale factor.
+    pub scale_factor: f64,
+    /// The layout name.
+    pub name: TextValue,
+    /// The position of the tab.
+    pub tab_order: i32,
+    /// The layout flags: `1` paper space line type scaling, `2` limits check.
+    pub flags: i16,
+    /// The lower limit.
+    pub limits_min: [f64; 2],
+    /// The upper limit.
+    pub limits_max: [f64; 2],
+    /// The lower corner of the extents.
+    pub extents_min: [f64; 3],
+    /// The upper corner of the extents.
+    pub extents_max: [f64; 3],
+    /// The block record of the layout's paper space (or model space).
+    pub block: Option<u64>,
+    /// The viewport that was active last.
+    pub last_active_viewport: Option<u64>,
+}
+
+/// Reads the layout at `entry`, an object of the class named `LAYOUT` in
+/// `classes`; `Ok(None)` when the object is of another kind.
+pub fn read_layout(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+    classes: &[ClassDef],
+) -> Result<Option<PlotLayout>, ObjectError> {
+    // LAYOUT has the fixed type code 82; a file may also name it by a class.
+    let is_layout = |code: u16| {
+        code == TYPE_LAYOUT
+            || (code >= 500
+                && classes
+                    .iter()
+                    .any(|c| i32::from(c.number) == i32::from(code) && c.dxf_name == "LAYOUT"))
+    };
+    let Some(Prefix {
+        mut r,
+        layout,
+        reactors,
+        xdictionary_stored,
+    }) = open_prefix(objects, entry, version, is_layout)?
+    else {
+        return Ok(None);
+    };
+    let mut strings = layout.strings.map(|(from, _)| {
+        let mut s = r.clone();
+        s.seek(from);
+        s
+    });
+    let page_setup_name = text_value(&mut r, &mut strings)?;
+    let printer = text_value(&mut r, &mut strings)?;
+    let plot_flags = r.bit_short()?;
+    let margins = [
+        r.bit_double()?,
+        r.bit_double()?,
+        r.bit_double()?,
+        r.bit_double()?,
+    ];
+    let paper_width = r.bit_double()?;
+    let paper_height = r.bit_double()?;
+    let paper_size = text_value(&mut r, &mut strings)?;
+    let plot_origin = [r.bit_double()?, r.bit_double()?];
+    let paper_units = r.bit_short()?;
+    let plot_rotation = r.bit_short()?;
+    let plot_type = r.bit_short()?;
+    let window_min = [r.bit_double()?, r.bit_double()?];
+    let window_max = [r.bit_double()?, r.bit_double()?];
+    if version < Version::R2004 {
+        text_value(&mut r, &mut strings)?; // the plot view name
+    }
+    let scale_numerator = r.bit_double()?;
+    let scale_denominator = r.bit_double()?;
+    let style_sheet = text_value(&mut r, &mut strings)?;
+    let scale_type = r.bit_short()?;
+    let scale_factor = r.bit_double()?;
+    r.bit_double()?; // the paper image origin
+    r.bit_double()?;
+    if version >= Version::R2004 {
+        r.bit_short()?; // shade plot mode
+        r.bit_short()?; // shade plot resolution level
+        r.bit_short()?; // shade plot custom DPI
+    }
+    let name = text_value(&mut r, &mut strings)?;
+    let tab_order = r.bit_long()?;
+    let flags = r.bit_short()?;
+    r.point_3bd()?; // the UCS origin
+    let limits_min = [r.raw_double()?, r.raw_double()?];
+    let limits_max = [r.raw_double()?, r.raw_double()?];
+    r.point_3bd()?; // the insertion base
+    r.point_3bd()?; // the UCS x axis
+    r.point_3bd()?; // the UCS y axis
+    r.bit_double()?; // the elevation
+    r.bit_short()?; // the orthographic view type
+    let extents_min = r.point_3bd()?;
+    let extents_max = r.point_3bd()?;
+    // The number of viewports (a bitlong, though the specification lists a long).
+    let viewport_count = if version >= Version::R2004 {
+        Some(r.bit_long()?)
+    } else {
+        None
+    };
+    if r.position() != layout.main_end {
+        return Err(ObjectError::Unexpected {
+            what: "layout main data length",
+        });
+    }
+    let opened = Opened {
+        r,
+        layout,
+        strings,
+        reactors,
+        xdictionary_stored,
+        name: TextValue::Ansi(Vec::new()),
+    };
+    let (mut handles, _) = opened.handles(entry.handle)?;
+    // R2000 lists the block and the last active viewport right after the
+    // owner; later versions put the plot view (and from R2007 the visual
+    // style) first.
+    if version >= Version::R2004 {
+        handles.next()?; // the plot view
+    }
+    if version >= Version::R2007 {
+        handles.next()?; // the visual style
+    }
+    let block = handles.next()?;
+    let last_active_viewport = handles.next()?;
+    let _ = viewport_count;
+    Ok(Some(PlotLayout {
+        handle: entry.handle,
+        page_setup_name,
+        printer,
+        plot_flags,
+        margins,
+        paper_width,
+        paper_height,
+        paper_size,
+        plot_origin,
+        paper_units,
+        plot_rotation,
+        plot_type,
+        window_min,
+        window_max,
+        scale_numerator,
+        scale_denominator,
+        style_sheet,
+        scale_type,
+        scale_factor,
+        name,
+        tab_order,
+        flags,
+        limits_min,
+        limits_max,
+        extents_min,
+        extents_max,
+        block,
+        last_active_viewport,
     }))
 }
 

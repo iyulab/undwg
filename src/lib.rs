@@ -63,10 +63,11 @@ pub use sections::{
 };
 pub use tables::{
     read_appid_name, read_block_control, read_block_header, read_block_name, read_dim_style,
-    read_dimstyle_name, read_image_definition, read_layer, read_linetype_name,
-    read_mlinestyle_name, read_style_name, BlockHeader, DimStyle, ImageDefinition, Layer,
-    TableColor, TYPE_APPID, TYPE_BLOCK_CONTROL, TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER,
-    TYPE_LINETYPE, TYPE_MLINESTYLE, TYPE_STYLE,
+    read_dimstyle_name, read_image_definition, read_layer, read_layout, read_linetype_name,
+    read_mline_style, read_mlinestyle_name, read_style_name, BlockHeader, DimStyle,
+    ImageDefinition, Layer, MlineElement, MlineStyle, PlotLayout, TableColor, TYPE_APPID,
+    TYPE_BLOCK_CONTROL, TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE,
+    TYPE_MLINESTYLE, TYPE_STYLE,
 };
 pub use variables::{
     read_header_variables, ControlHandles, DimensionVariables, ExtendedVariables, HeaderColor,

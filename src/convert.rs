@@ -23,7 +23,8 @@ use uncad_model::model::{
 };
 use uncad_model::tables::{
     AngularUnitFormat, ArcSymbol, BlockRecord, DimStyleRecord, ExternalReference, FractionFormat,
-    ImageDefinition, LayerRecord, LinearUnitFormat, ResolutionUnit, Tables,
+    ImageDefinition, LayerRecord, LayoutRecord, LinearUnitFormat, PlotPaperUnits, PlotRotation,
+    PlotSettings, ResolutionUnit, Tables,
 };
 use uncad_model::text::decode_escapes;
 use uncad_model::{CadDatabase, Entity, HeaderVariables as ModelHeader, ReadDiagnostics};
@@ -34,8 +35,8 @@ use crate::entities::{self, read_entity_links, read_entity_with_classes, Geometr
 use crate::objects::ObjectEntry;
 use crate::tables::{
     read_appid_name, read_block_control, read_block_header, read_dim_style, read_dimstyle_name,
-    read_image_definition, read_layer, read_linetype_name, read_mlinestyle_name, read_style_name,
-    BlockHeader, Layer,
+    read_image_definition, read_layer, read_layout, read_linetype_name, read_mline_style,
+    read_mlinestyle_name, read_style_name, BlockHeader, Layer,
 };
 use crate::version::Version;
 
@@ -151,6 +152,8 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let mut styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut dim_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut acad: Option<u64> = None;
+    let mut mline_style_rows: Vec<crate::tables::MlineStyle> = Vec::new();
+    let mut layout_rows: Vec<crate::tables::PlotLayout> = Vec::new();
     let mut dim_style_rows: Vec<crate::tables::DimStyle> = Vec::new();
     let mut image_defs: BTreeMap<u64, crate::tables::ImageDefinition> = BTreeMap::new();
     let mut mline_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
@@ -213,6 +216,29 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
                 continue;
             }
         }
+        match read_mline_style(objects, *e, version) {
+            Ok(Some(style)) => {
+                mline_styles.insert(e.handle, style.name.clone());
+                mline_style_rows.push(style);
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                notes.add("multiline style that could not be read");
+                continue;
+            }
+        }
+        match read_layout(objects, *e, version, drawing.classes()) {
+            Ok(Some(layout)) => {
+                layout_rows.push(layout);
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                notes.add(format!("layout that could not be read ({e})"));
+                continue;
+            }
+        }
         match read_mlinestyle_name(objects, *e, version) {
             Ok(Some(name)) => {
                 mline_styles.insert(e.handle, name);
@@ -267,33 +293,41 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         }
     }
 
-    // Block names, made unique the way a table needs: an anonymous block
-    // (`*U`, `*D`, ...) is numbered by its place in the block table, and a
-    // name the file gives twice (the paper space of each layout) gets a
-    // counter from the second on.
+    // Block names, made unique the way a table needs. An anonymous block
+    // (`*U`, `*D`, ...) is numbered by its place in the block table. A name the
+    // file gives to several blocks (the paper space of each layout) belongs
+    // bare to the block the header names as the current paper space and, for the
+    // others, gets its place in the table as a number.
     let mut block_names: BTreeMap<u64, String> = BTreeMap::new();
-    let mut taken: BTreeMap<String, usize> = BTreeMap::new();
     let position: BTreeMap<u64, usize> = table_order
         .iter()
         .enumerate()
         .filter_map(|(i, h)| h.map(|h| (h, i)))
         .collect();
-    for (index, block) in headers.iter().enumerate() {
-        let index = position.get(&block.handle).copied().unwrap_or(index);
+    let mut stored_names: BTreeMap<u64, String> = BTreeMap::new();
+    let mut uses: BTreeMap<String, usize> = BTreeMap::new();
+    for block in &headers {
         let Some(stored) = characters(&block.name) else {
             notes.add("block name in a code page that is not read");
             continue;
         };
-        let name = if block.anonymous {
+        *uses.entry(stored.clone()).or_default() += 1;
+        stored_names.insert(block.handle, stored);
+    }
+    let current_paper = drawing.variables().paper_space_block;
+    let mut bare_taken: BTreeSet<String> = BTreeSet::new();
+    for (index, block) in headers.iter().enumerate() {
+        let Some(stored) = stored_names.get(&block.handle) else {
+            continue;
+        };
+        let index = position.get(&block.handle).copied().unwrap_or(index);
+        let shared = uses.get(stored).copied().unwrap_or(0) > 1;
+        let name = if block.anonymous || (shared && block.handle != current_paper) {
             format!("{stored}{index}")
+        } else if bare_taken.insert(stored.clone()) {
+            stored.clone()
         } else {
-            let seen = taken.entry(stored.clone()).or_default();
-            *seen += 1;
-            if *seen == 1 {
-                stored
-            } else {
-                format!("{stored}{}", *seen - 2)
-            }
+            format!("{stored}{index}")
         };
         block_names.insert(block.handle, name);
     }
@@ -380,6 +414,12 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         vertices_2d: &vertices_2d,
         vertices_3d: &vertices_3d,
     };
+
+    let viewport_handles: BTreeSet<u64> = read
+        .iter()
+        .filter(|e| matches!(e.geometry, Geometry::Viewport(_)))
+        .map(|e| e.common.handle)
+        .collect();
 
     // The attributes first: an insertion takes the ones it lists.
     let mut attribs: BTreeMap<u64, AttribEntity> = BTreeMap::new();
@@ -523,6 +563,80 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         );
     }
 
+    // The multiline styles: each one's line offsets, in the order the style keeps them.
+    let mut mline_style_records: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for m in &mline_style_rows {
+        match characters(&m.name) {
+            Some(name) => {
+                mline_style_records.insert(name, m.elements.iter().map(|e| e.offset).collect());
+            }
+            None => notes.add("multiline style name in a code page that is not read"),
+        }
+    }
+
+    // The layouts, by name.
+    let mut layout_records: BTreeMap<String, LayoutRecord> = BTreeMap::new();
+    for l in &layout_rows {
+        let (Some(name), Some(paper_name)) = (characters(&l.name), characters(&l.paper_size))
+        else {
+            notes.add("layout in a code page that is not read");
+            continue;
+        };
+        layout_records.insert(
+            name.clone(),
+            LayoutRecord {
+                name,
+                tab_order: l.tab_order,
+                block_name: match l.block {
+                    None => Ref::Absent,
+                    Some(h) => match block_names.get(&h) {
+                        Some(n) => Ref::Resolved(n.clone()),
+                        None => Ref::Unresolved(hex(h)),
+                    },
+                },
+                limits_min: point2(l.limits_min),
+                limits_max: point2(l.limits_max),
+                plot_settings: PlotSettings {
+                    paper_name,
+                    paper_width: l.paper_width,
+                    paper_height: l.paper_height,
+                    margin_left: l.margins[0],
+                    margin_bottom: l.margins[1],
+                    margin_right: l.margins[2],
+                    margin_top: l.margins[3],
+                    plot_origin: point2(l.plot_origin),
+                    paper_units: match l.paper_units {
+                        0 => Some(PlotPaperUnits::Inches),
+                        1 => Some(PlotPaperUnits::Millimeters),
+                        2 => Some(PlotPaperUnits::Pixels),
+                        _ => None,
+                    },
+                    rotation: match l.plot_rotation {
+                        0 => Some(PlotRotation::Unrotated),
+                        1 => Some(PlotRotation::Counterclockwise90),
+                        2 => Some(PlotRotation::UpsideDown),
+                        3 => Some(PlotRotation::Clockwise90),
+                        _ => None,
+                    },
+                    scale_numerator: l.scale_numerator,
+                    scale_denominator: l.scale_denominator,
+                },
+                paper_space_linetype_scaling: l.flags & 1 != 0,
+                limits_check: l.flags & 2 != 0,
+                extents_min: Some(point(l.extents_min)),
+                extents_max: Some(point(l.extents_max)),
+                // A sheet names the VIEWPORT entity that was active last. A model
+                // layout names a VPORT table record there, which is not an entity.
+                active_viewport: match l.last_active_viewport {
+                    None => Ref::Absent,
+                    Some(h) if viewport_handles.contains(&h) => Ref::Resolved(EntityId::new(h)),
+                    Some(h) if by_handle.contains_key(&h) => Ref::Absent,
+                    Some(h) => Ref::Unresolved(hex(h)),
+                },
+            },
+        );
+    }
+
     // The dimension styles, by name.
     let mut dim_style_records: BTreeMap<String, DimStyleRecord> = BTreeMap::new();
     for d in &dim_style_rows {
@@ -597,7 +711,8 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             block_records,
             image_definitions,
             dim_styles: dim_style_records,
-            ..Tables::default()
+            mlinestyles: mline_style_records,
+            layouts: layout_records,
         },
         header,
         read_diagnostics: notes.into_diagnostics(),
