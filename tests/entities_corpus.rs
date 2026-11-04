@@ -1,7 +1,7 @@
 //! Lines, circles, arcs and points of real files.
 //!
 //! Point `UNDWG_CORPUS` at one or more directories (separated like `PATH`)
-//! holding `.dwg` files. Every line, circle, arc, point, lightweight polyline and block insertion whose frame is intact must
+//! holding `.dwg` files. Every line, circle, arc, point, lightweight polyline, ellipse and block insertion whose frame is intact must
 //! read, state the handle the object map gives, and hold finite numbers (and
 //! a non-negative radius). With `UNDWG_DUMP` set to a file name, every entity
 //! read is also written there, one per line, so that it can be compared with
@@ -61,8 +61,9 @@ fn every_real_line_circle_and_arc_reads() {
         mut points,
         mut polylines,
         mut inserts,
+        mut ellipses,
         mut failed,
-    ) = (0, 0, 0, 0, 0, 0, 0, 0usize);
+    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0usize);
     for path in &files {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let (version, handles, objects): (Version, Vec<u8>, Vec<u8>) = match read_header(&bytes) {
@@ -98,7 +99,7 @@ fn every_real_line_circle_and_arc_reads() {
             let Ok(frame) = read_object_frame(&objects, *entry, version) else {
                 continue;
             };
-            if !matches!(frame.type_code, 7 | 17..=19 | 27 | 77) {
+            if !matches!(frame.type_code, 7 | 17..=19 | 27 | 35 | 77) {
                 continue;
             }
             let entity = match read_entity(&objects, *entry, version) {
@@ -218,6 +219,29 @@ fn every_real_line_circle_and_arc_reads() {
                         i.position, i.scale, i.rotation, i.extrusion
                     )
                 }
+                Geometry::Ellipse(e) => {
+                    ellipses += 1;
+                    assert!(
+                        finite(&e.center)
+                            && finite(&e.major_axis)
+                            && finite(&e.extrusion)
+                            && e.axis_ratio.is_finite()
+                            && e.start_angle.is_finite()
+                            && e.end_angle.is_finite(),
+                        "{}: {:#x}",
+                        path.display(),
+                        entry.handle
+                    );
+                    format!(
+                        "ELLIPSE\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}",
+                        e.center,
+                        e.major_axis,
+                        e.extrusion,
+                        e.axis_ratio,
+                        e.start_angle,
+                        e.end_angle
+                    )
+                }
                 _ => continue,
             };
             if let Some(out) = dump.as_mut() {
@@ -226,7 +250,7 @@ fn every_real_line_circle_and_arc_reads() {
         }
     }
     eprintln!(
-        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts read; {failed} unreadable"
+        "{files_read} files: {lines} lines, {circles} circles, {arcs} arcs, {points} points, {polylines} polylines, {inserts} inserts, {ellipses} ellipses read; {failed} unreadable"
     );
     assert!(files_read > 0);
     assert_eq!(failed, 0, "entities whose frame holds must read");

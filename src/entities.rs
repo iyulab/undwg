@@ -3,8 +3,8 @@
 //! An entity begins with data every entity has -- its handle, extended data,
 //! a flag for a stored graphic, colour, linetype scale and so on -- and then
 //! the fields of its own kind. This module reads the common data and the
-//! simplest kinds: lines, circles, arcs, points, lightweight polylines and
-//! block insertions. Any other kind is left
+//! simplest kinds: lines, circles, arcs, points, ellipses, lightweight
+//! polylines and block insertions. Any other kind is left
 //! alone (`Ok(None)`), never guessed at.
 //!
 //! Only the main bit stream is read; the strings and handle references that
@@ -24,6 +24,8 @@ pub const TYPE_LINE: u16 = 19;
 pub const TYPE_POINT: u16 = 27;
 /// The type code of a block insertion.
 pub const TYPE_INSERT: u16 = 7;
+/// The type code of an ellipse.
+pub const TYPE_ELLIPSE: u16 = 35;
 /// The type code of a lightweight polyline.
 pub const TYPE_LWPOLYLINE: u16 = 77;
 
@@ -107,6 +109,24 @@ pub struct Point {
     pub x_axis_angle: f64,
 }
 
+/// An ellipse or an elliptical arc. The centre and the major axis vector are
+/// in world coordinates, though the ellipse is planar and has an extrusion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ellipse {
+    /// The centre.
+    pub center: [f64; 3],
+    /// The semi-major axis as a vector from the centre.
+    pub major_axis: [f64; 3],
+    /// The extrusion direction.
+    pub extrusion: [f64; 3],
+    /// The ratio of the minor axis to the major axis.
+    pub axis_ratio: f64,
+    /// The starting angle, as an eccentric anomaly in radians.
+    pub start_angle: f64,
+    /// The ending angle, as an eccentric anomaly in radians.
+    pub end_angle: f64,
+}
+
 /// A block insertion. The block it inserts is named by a handle in the
 /// object's handle stream, which this reader does not read.
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +194,8 @@ pub enum Geometry {
     LwPolyline(LwPolyline),
     /// A block insertion.
     Insert(Insert),
+    /// An ellipse.
+    Ellipse(Ellipse),
 }
 
 /// An entity: its common data and its geometry.
@@ -401,6 +423,17 @@ fn read_lwpolyline(r: &mut BitReader<'_>, version: Version) -> Result<LwPolyline
     })
 }
 
+fn read_ellipse(r: &mut BitReader<'_>) -> Result<Ellipse, BitError> {
+    Ok(Ellipse {
+        center: r.point_3bd()?,
+        major_axis: r.point_3bd()?,
+        extrusion: r.point_3bd()?,
+        axis_ratio: r.bit_double()?,
+        start_angle: r.bit_double()?,
+        end_angle: r.bit_double()?,
+    })
+}
+
 fn read_insert(r: &mut BitReader<'_>) -> Result<Insert, BitError> {
     let position = r.point_3bd()?;
     // How the scale is stored: all ones, a value with the other two defaulted
@@ -443,8 +476,8 @@ fn read_point(r: &mut BitReader<'_>) -> Result<Point, BitError> {
     })
 }
 
-/// Reads the entity at `entry` if it is a line, a circle, an arc, a point, a
-/// lightweight polyline or a block insertion;
+/// Reads the entity at `entry` if it is a line, a circle, an arc, a point, an
+/// ellipse, a lightweight polyline or a block insertion;
 /// `Ok(None)` for any other kind of object.
 ///
 /// `objects` is the assembled `AcDb:AcDbObjects` section (for R2000 the
@@ -458,7 +491,13 @@ pub fn read_entity(
     let (frame, mut r) = open_object(objects, entry, version)?;
     if !matches!(
         frame.type_code,
-        TYPE_ARC | TYPE_CIRCLE | TYPE_LINE | TYPE_POINT | TYPE_LWPOLYLINE | TYPE_INSERT
+        TYPE_ARC
+            | TYPE_CIRCLE
+            | TYPE_LINE
+            | TYPE_POINT
+            | TYPE_LWPOLYLINE
+            | TYPE_INSERT
+            | TYPE_ELLIPSE
     ) {
         return Ok(None);
     }
@@ -474,6 +513,7 @@ pub fn read_entity(
         TYPE_CIRCLE => Geometry::Circle(read_circle(&mut r)?),
         TYPE_LWPOLYLINE => Geometry::LwPolyline(read_lwpolyline(&mut r, version)?),
         TYPE_INSERT => Geometry::Insert(read_insert(&mut r)?),
+        TYPE_ELLIPSE => Geometry::Ellipse(read_ellipse(&mut r)?),
         _ => Geometry::Arc(read_arc(&mut r)?),
     };
     Ok(Some(Entity { common, geometry }))
