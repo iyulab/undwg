@@ -20,10 +20,17 @@
 
 mod checksum;
 mod header;
+mod lz;
+mod sections;
 mod version;
 
 pub use header::{
     read_header, FileHeader, HeaderError, HeaderR2000, HeaderR2004, SectionLocator,
     SECTION_PAGE_MAP_BIAS,
+};
+pub use lz::LzError;
+pub use sections::{
+    read_data_page, read_directory, read_section, DataPageHeader, PageMapEntry, SectionDescription,
+    SectionDirectory, SectionError, SectionPage,
 };
 pub use version::{detect_version, Error, Unsupported, Version};

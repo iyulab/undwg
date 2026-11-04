@@ -69,9 +69,50 @@ pub(crate) fn crc32(seed: u32, data: &[u8]) -> u32 {
     !inverted
 }
 
+/// The checksum of a section page, continuing from `seed` (0 to start).
+///
+/// Two running sums are kept modulo 0xFFF1 and folded together; the data is
+/// taken in chunks of 0x15B0 bytes so the sums cannot overflow before the
+/// reduction.
+pub(crate) fn page_checksum(seed: u32, data: &[u8]) -> u32 {
+    let mut sum1 = seed & 0xFFFF;
+    let mut sum2 = seed >> 16;
+    for chunk in data.chunks(0x15B0) {
+        for &byte in chunk {
+            sum1 += u32::from(byte);
+            sum2 += sum1;
+        }
+        sum1 %= 0xFFF1;
+        sum2 %= 0xFFF1;
+    }
+    (sum2 << 16) | (sum1 & 0xFFFF)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_page_checksum_of_nothing_is_the_seed() {
+        assert_eq!(page_checksum(0, b""), 0);
+        assert_eq!(page_checksum(0x0001_0002, b""), 0x0001_0002);
+    }
+
+    #[test]
+    fn the_page_checksum_is_the_adler_pair_of_sums() {
+        // Seeded with 1, the two sums are Adler-32's: the check value of "Wikipedia".
+        assert_eq!(page_checksum(1, b"Wikipedia"), 0x11E6_0398);
+    }
+
+    #[test]
+    fn the_page_checksum_continues_across_a_split_and_across_chunks() {
+        let data: Vec<u8> = (0..20_000u32).map(|i| (i * 7 + 3) as u8).collect();
+        let (a, b) = data.split_at(9_999);
+        assert_eq!(
+            page_checksum(page_checksum(0, a), b),
+            page_checksum(0, &data)
+        );
+    }
 
     #[test]
     fn the_16_bit_table_starts_as_the_specification_prints_it() {
