@@ -173,7 +173,174 @@ pub fn read_database_with_facts(
         }
     }
 
-    // The tables the entities refer to by handle.
+    let ObjectTables {
+        layers,
+        linetypes,
+        styles,
+        dim_styles,
+        acad,
+        mline_style_rows,
+        layout_rows,
+        dim_style_rows,
+        image_defs,
+        mline_styles,
+        mleader_styles,
+        table_styles,
+        headers,
+        table_order,
+    } = read_object_tables(&drawing, &entries, &mut notes);
+
+    // Block names, unique the way a table needs.
+    let block_names = block_names_of(
+        &headers,
+        &table_order,
+        drawing.variables().paper_space_block,
+        page,
+        &mut notes,
+    );
+    let model_space = block_names.get(&drawing.variables().model_space_block);
+    let paper_space = block_names.get(&drawing.variables().paper_space_block);
+
+    let (layer_names, layer_records) = layer_records_of(&layers, &linetypes, page, &mut notes);
+
+    // Every entity the file keeps, read once.
+    let by_handle: BTreeMap<u64, ObjectEntry> = entries.iter().map(|e| (e.handle, *e)).collect();
+    let read = read_entities(&drawing, &entries, &mut notes);
+    // The vertices of polylines, which the polyline that owns them takes.
+    let (vertices_2d, vertices_3d, faces) = polyline_parts(&read);
+    let ctx = Context {
+        version,
+        page,
+        objects,
+        by_handle: &by_handle,
+        layers: &layer_names,
+        linetypes: &linetypes,
+        styles: &styles,
+        dim_styles: &dim_styles,
+        mline_styles: &mline_styles,
+        mleader_styles: &mleader_styles,
+        table_styles: &table_styles,
+        acad,
+        block_names: &block_names,
+        vertices_2d: &vertices_2d,
+        vertices_3d: &vertices_3d,
+        faces: &faces,
+    };
+
+    let viewport_handles: BTreeSet<u64> = read
+        .iter()
+        .filter(|e| matches!(e.geometry, Geometry::Viewport(_)))
+        .map(|e| e.common.handle)
+        .collect();
+
+    // The attributes first: an insertion takes the ones it lists.
+    let attribs = attribute_entities(&read, &ctx, &mut notes);
+
+    // The entities, converted, with the block each one says it belongs to.
+    let converted = convert_all(
+        &read,
+        &ctx,
+        &attribs,
+        &block_names,
+        model_space,
+        paper_space,
+        &mut notes,
+    );
+
+    // The entities of each block, in the order the block draws them: the
+    // list the block header keeps (R2004 and later), or the chain from its
+    // first entity to its last (R2000).
+    let mut by_block = entities_by_block(&headers, &block_names, converted, &ctx, &mut notes);
+
+    // What model space and the paper spaces own is also listed at the top.
+    let top_level = top_level_entities(&headers, &block_names, &by_block, model_space, paper_space);
+
+    // The block records, by name.
+    let block_records = block_records_of(&headers, &block_names, &mut by_block, page, &mut notes);
+
+    // The multiline styles: each one's line offsets, in the order the style keeps them.
+    let mline_style_records = mline_style_records_of(&mline_style_rows, page, &mut notes);
+
+    // The layouts, by name.
+    let layout_records = layout_records_of(
+        &layout_rows,
+        page,
+        &block_names,
+        &viewport_handles,
+        &by_handle,
+        &mut notes,
+    );
+
+    // The dimension styles, by name.
+    let dim_style_records = dim_style_records_of(&dim_style_rows, page, &mut notes);
+
+    // The image definitions, by handle (the key an image names its picture by).
+    let image_definitions = image_definitions_of(&image_defs, page, &mut notes);
+
+    let vars = drawing.variables();
+    let header = ModelHeader {
+        insunits: Some(vars.insertion_units as u16),
+        fingerprintguid: characters(&vars.fingerprint_guid, page),
+        versionguid: characters(&vars.version_guid, page),
+        pdmode: Some(vars.point_mode),
+        pdsize: Some(vars.point_size),
+    };
+
+    let current_layer = layers
+        .get(&vars.current_layer)
+        .and_then(|layer| characters(&layer.name, page));
+    let facts = DrawingFacts {
+        version,
+        code_page: drawing.code_page(),
+        variables: vars.clone(),
+        measurement: drawing.measurement(),
+        current_layer,
+    };
+    let database = CadDatabase {
+        entities: top_level,
+        tables: Tables {
+            layers: layer_records,
+            block_records,
+            image_definitions,
+            dim_styles: dim_style_records,
+            mlinestyles: mline_style_records,
+            layouts: layout_records,
+        },
+        header,
+        read_diagnostics: notes.into_diagnostics(),
+    };
+    Ok((database, facts))
+}
+
+/// What the table objects of a file say, by handle, and the block headers in
+/// the order the file lists them.
+struct ObjectTables {
+    layers: BTreeMap<u64, Layer>,
+    linetypes: BTreeMap<u64, TextValue>,
+    styles: BTreeMap<u64, TextValue>,
+    dim_styles: BTreeMap<u64, TextValue>,
+    acad: Option<u64>,
+    mline_style_rows: Vec<crate::tables::MlineStyle>,
+    layout_rows: Vec<crate::tables::PlotLayout>,
+    dim_style_rows: Vec<crate::tables::DimStyle>,
+    image_defs: BTreeMap<u64, crate::tables::ImageDefinition>,
+    mline_styles: BTreeMap<u64, TextValue>,
+    mleader_styles: BTreeMap<u64, i16>,
+    table_styles: BTreeMap<u64, i16>,
+    headers: Vec<BlockHeader>,
+    table_order: Vec<Option<u64>>,
+}
+
+/// Reads every table object the entities refer to by handle; what cannot be
+/// read is reported, not skipped quietly.
+fn read_object_tables(
+    drawing: &Drawing<'_>,
+    entries: &[ObjectEntry],
+    notes: &mut Notes,
+) -> ObjectTables {
+    let version = drawing.version();
+    let page = CodePage::of(drawing.code_page());
+    let objects = drawing.objects();
     let mut layers: BTreeMap<u64, Layer> = BTreeMap::new();
     let mut linetypes: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut styles: BTreeMap<u64, TextValue> = BTreeMap::new();
@@ -188,7 +355,7 @@ pub fn read_database_with_facts(
     let mut table_styles: BTreeMap<u64, i16> = BTreeMap::new();
     let mut headers: Vec<BlockHeader> = Vec::new();
     let mut table_order: Vec<Option<u64>> = Vec::new();
-    for e in &entries {
+    for e in entries {
         match read_layer(objects, *e, version) {
             Ok(Some(layer)) => {
                 layers.insert(e.handle, layer);
@@ -345,12 +512,36 @@ pub fn read_database_with_facts(
             Err(_) => notes.add("block header that could not be read"),
         }
     }
+    ObjectTables {
+        layers,
+        linetypes,
+        styles,
+        dim_styles,
+        acad,
+        mline_style_rows,
+        layout_rows,
+        dim_style_rows,
+        image_defs,
+        mline_styles,
+        mleader_styles,
+        table_styles,
+        headers,
+        table_order,
+    }
+}
 
-    // Block names, made unique the way a table needs. An anonymous block
-    // (`*U`, `*D`, ...) is numbered by its place in the block table. A name the
-    // file gives to several blocks (the paper space of each layout) belongs
-    // bare to the block the header names as the current paper space and, for the
-    // others, gets its place in the table as a number.
+/// Block names, made unique the way a table needs. An anonymous block
+/// (`*U`, `*D`, ...) is numbered by its place in the block table. A name the
+/// file gives to several blocks (the paper space of each layout) belongs bare
+/// to the block the header names as the current paper space and, for the
+/// others, gets its place in the table as a number.
+fn block_names_of(
+    headers: &[BlockHeader],
+    table_order: &[Option<u64>],
+    current_paper: u64,
+    page: CodePage,
+    notes: &mut Notes,
+) -> BTreeMap<u64, String> {
     let mut block_names: BTreeMap<u64, String> = BTreeMap::new();
     let position: BTreeMap<u64, usize> = table_order
         .iter()
@@ -359,7 +550,7 @@ pub fn read_database_with_facts(
         .collect();
     let mut stored_names: BTreeMap<u64, String> = BTreeMap::new();
     let mut uses: BTreeMap<String, usize> = BTreeMap::new();
-    for block in &headers {
+    for block in headers {
         let Some(stored) = characters(&block.name, page) else {
             notes.add("block name in a code page that is not read");
             continue;
@@ -367,7 +558,6 @@ pub fn read_database_with_facts(
         *uses.entry(stored.clone()).or_default() += 1;
         stored_names.insert(block.handle, stored);
     }
-    let current_paper = drawing.variables().paper_space_block;
     let mut bare_taken: BTreeSet<String> = BTreeSet::new();
     for (index, block) in headers.iter().enumerate() {
         let Some(stored) = stored_names.get(&block.handle) else {
@@ -384,13 +574,19 @@ pub fn read_database_with_facts(
         };
         block_names.insert(block.handle, name);
     }
-    let model_space = block_names.get(&drawing.variables().model_space_block);
-    let paper_space = block_names.get(&drawing.variables().paper_space_block);
+    block_names
+}
 
-    // The layers, by name.
+/// The layers by handle and, by name, the records the model keeps.
+fn layer_records_of(
+    layers: &BTreeMap<u64, Layer>,
+    linetypes: &BTreeMap<u64, TextValue>,
+    page: CodePage,
+    notes: &mut Notes,
+) -> (BTreeMap<u64, String>, BTreeMap<String, LayerRecord>) {
     let mut layer_names: BTreeMap<u64, String> = BTreeMap::new();
     let mut layer_records: BTreeMap<String, LayerRecord> = BTreeMap::new();
-    for (handle, layer) in &layers {
+    for (handle, layer) in layers {
         let Some(name) = characters(&layer.name, page) else {
             notes.add("layer name in a code page that is not read");
             continue;
@@ -428,22 +624,41 @@ pub fn read_database_with_facts(
             },
         );
     }
+    (layer_names, layer_records)
+}
 
-    // Every entity the file keeps, read once.
-    let by_handle: BTreeMap<u64, ObjectEntry> = entries.iter().map(|e| (e.handle, *e)).collect();
+/// Every entity the file keeps, read once; what cannot be read is reported.
+fn read_entities(
+    drawing: &Drawing<'_>,
+    entries: &[ObjectEntry],
+    notes: &mut Notes,
+) -> Vec<entities::Entity> {
+    let version = drawing.version();
+    let objects = drawing.objects();
     let mut read: Vec<entities::Entity> = Vec::new();
-    for e in &entries {
+    for e in entries {
         match read_entity_with_classes(objects, *e, version, drawing.classes()) {
             Ok(Some(entity)) => read.push(entity),
             Ok(None) => {}
             Err(e) => notes.add(format!("entity that could not be read ({e})")),
         }
     }
-    // The vertices of polylines, which the polyline that owns them takes.
+    read
+}
+
+type PolylineParts = (
+    BTreeMap<u64, entities::Vertex2d>,
+    BTreeMap<u64, entities::Vertex3d>,
+    BTreeMap<u64, entities::VertexFace>,
+);
+
+/// The vertices and faces of polylines, by handle, which the polyline that
+/// owns them takes.
+fn polyline_parts(read: &[entities::Entity]) -> PolylineParts {
     let mut vertices_2d: BTreeMap<u64, entities::Vertex2d> = BTreeMap::new();
     let mut vertices_3d: BTreeMap<u64, entities::Vertex3d> = BTreeMap::new();
     let mut faces: BTreeMap<u64, entities::VertexFace> = BTreeMap::new();
-    for entity in &read {
+    for entity in read {
         match &entity.geometry {
             Geometry::Vertex2d(v) => {
                 vertices_2d.insert(entity.common.handle, v.clone());
@@ -457,40 +672,25 @@ pub fn read_database_with_facts(
             _ => {}
         }
     }
-    let ctx = Context {
-        version,
-        page,
-        objects,
-        by_handle: &by_handle,
-        layers: &layer_names,
-        linetypes: &linetypes,
-        styles: &styles,
-        dim_styles: &dim_styles,
-        mline_styles: &mline_styles,
-        mleader_styles: &mleader_styles,
-        table_styles: &table_styles,
-        acad,
-        block_names: &block_names,
-        vertices_2d: &vertices_2d,
-        vertices_3d: &vertices_3d,
-        faces: &faces,
-    };
+    (vertices_2d, vertices_3d, faces)
+}
 
-    let viewport_handles: BTreeSet<u64> = read
-        .iter()
-        .filter(|e| matches!(e.geometry, Geometry::Viewport(_)))
-        .map(|e| e.common.handle)
-        .collect();
-
-    // The attributes first: an insertion takes the ones it lists.
+/// The attributes of the file by handle, converted first: an insertion takes
+/// the ones it lists.
+fn attribute_entities(
+    read: &[entities::Entity],
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> BTreeMap<u64, AttribEntity> {
+    let page = ctx.page;
     let mut attribs: BTreeMap<u64, AttribEntity> = BTreeMap::new();
-    for entity in &read {
+    for entity in read {
         if let Geometry::Attrib(a) = &entity.geometry {
-            if let Some(text) = convert_text(&a.text, &ctx, &mut notes) {
+            if let Some(text) = convert_text(&a.text, ctx, notes) {
                 attribs.insert(
                     entity.common.handle,
                     AttribEntity {
-                        common: convert_common(entity, &ctx),
+                        common: convert_common(entity, ctx),
                         start_point: text.start_point,
                         text_height: text.height,
                         tag: String::new(),
@@ -518,10 +718,22 @@ pub fn read_database_with_facts(
             }
         }
     }
+    attribs
+}
 
-    // The entities, converted, with the block each one says it belongs to.
+/// Every entity converted, by handle, with the block each one says it
+/// belongs to.
+fn convert_all(
+    read: &[entities::Entity],
+    ctx: &Context<'_>,
+    attribs: &BTreeMap<u64, AttribEntity>,
+    block_names: &BTreeMap<u64, String>,
+    model_space: Option<&String>,
+    paper_space: Option<&String>,
+    notes: &mut Notes,
+) -> BTreeMap<u64, (String, Entity)> {
     let mut converted: BTreeMap<u64, (String, Entity)> = BTreeMap::new();
-    for entity in &read {
+    for entity in read {
         let owner = match entity.references.owner.and_then(|h| block_names.get(&h)) {
             Some(name) => Some(name),
             None => match entity.common.entity_mode {
@@ -549,7 +761,7 @@ pub fn read_database_with_facts(
             }
             continue;
         };
-        let Some(converted_entity) = convert_entity(entity, &ctx, &attribs, &mut notes) else {
+        let Some(converted_entity) = convert_entity(entity, ctx, attribs, notes) else {
             let kind = format!("{:?}", entity.geometry);
             let kind = kind.split(['(', ' ', '{']).next().unwrap_or("").to_string();
             notes.add(format!("{kind} entity not converted"));
@@ -557,12 +769,23 @@ pub fn read_database_with_facts(
         };
         converted.insert(entity.common.handle, (owner.clone(), converted_entity));
     }
+    converted
+}
 
-    // The entities of each block, in the order the block draws them: the
-    // list the block header keeps (R2004 and later), or the chain from its
-    // first entity to its last (R2000).
+/// The entities of each block, in the order the block draws them: the list
+/// the block header keeps (R2004 and later), or the chain from its first
+/// entity to its last (R2000). An entity no block lists is kept in the block
+/// it names, after the listed ones, and reported.
+fn entities_by_block(
+    headers: &[BlockHeader],
+    block_names: &BTreeMap<u64, String>,
+    mut converted: BTreeMap<u64, (String, Entity)>,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> BTreeMap<String, Vec<Entity>> {
+    let version = ctx.version;
     let mut by_block: BTreeMap<String, Vec<Entity>> = BTreeMap::new();
-    for block in &headers {
+    for block in headers {
         let Some(name) = block_names.get(&block.handle) else {
             continue;
         };
@@ -570,7 +793,7 @@ pub fn read_database_with_facts(
             block.owned_entities.clone()
         } else {
             match (block.first_entity, block.last_entity) {
-                (Some(first), Some(last)) => chain(&ctx, first, last, &mut notes),
+                (Some(first), Some(last)) => chain(ctx, first, last, notes),
                 _ => Vec::new(),
             }
         };
@@ -586,10 +809,20 @@ pub fn read_database_with_facts(
         notes.add("entity that its block does not list");
         by_block.entry(owner).or_default().push(entity);
     }
+    by_block
+}
 
-    // What model space and the paper spaces own is also listed at the top.
+/// What model space and the paper spaces own, which is also listed at the
+/// top.
+fn top_level_entities(
+    headers: &[BlockHeader],
+    block_names: &BTreeMap<u64, String>,
+    by_block: &BTreeMap<String, Vec<Entity>>,
+    model_space: Option<&String>,
+    paper_space: Option<&String>,
+) -> Vec<Entity> {
     let mut top_level: Vec<Entity> = Vec::new();
-    for block in &headers {
+    for block in headers {
         let Some(name) = block_names.get(&block.handle) else {
             continue;
         };
@@ -606,10 +839,19 @@ pub fn read_database_with_facts(
             }
         }
     }
+    top_level
+}
 
-    // The block records, by name.
+/// The block records by name, each with the entities it draws.
+fn block_records_of(
+    headers: &[BlockHeader],
+    block_names: &BTreeMap<u64, String>,
+    by_block: &mut BTreeMap<String, Vec<Entity>>,
+    page: CodePage,
+    notes: &mut Notes,
+) -> BTreeMap<String, BlockRecord> {
     let mut block_records: BTreeMap<String, BlockRecord> = BTreeMap::new();
-    for block in &headers {
+    for block in headers {
         let Some(name) = block_names.get(&block.handle) else {
             continue;
         };
@@ -637,10 +879,18 @@ pub fn read_database_with_facts(
             },
         );
     }
+    block_records
+}
 
-    // The multiline styles: each one's line offsets, in the order the style keeps them.
+/// The multiline styles: each one's line offsets, in the order the style
+/// keeps them.
+fn mline_style_records_of(
+    rows: &[crate::tables::MlineStyle],
+    page: CodePage,
+    notes: &mut Notes,
+) -> BTreeMap<String, Vec<f64>> {
     let mut mline_style_records: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-    for m in &mline_style_rows {
+    for m in rows {
         match characters(&m.name, page) {
             Some(name) => {
                 mline_style_records.insert(name, m.elements.iter().map(|e| e.offset).collect());
@@ -648,10 +898,20 @@ pub fn read_database_with_facts(
             None => notes.add("multiline style name in a code page that is not read"),
         }
     }
+    mline_style_records
+}
 
-    // The layouts, by name.
+/// The layouts by name.
+fn layout_records_of(
+    rows: &[crate::tables::PlotLayout],
+    page: CodePage,
+    block_names: &BTreeMap<u64, String>,
+    viewport_handles: &BTreeSet<u64>,
+    by_handle: &BTreeMap<u64, ObjectEntry>,
+    notes: &mut Notes,
+) -> BTreeMap<String, LayoutRecord> {
     let mut layout_records: BTreeMap<String, LayoutRecord> = BTreeMap::new();
-    for l in &layout_rows {
+    for l in rows {
         let (Some(name), Some(paper_name)) =
             (characters(&l.name, page), characters(&l.paper_size, page))
         else {
@@ -712,10 +972,17 @@ pub fn read_database_with_facts(
             },
         );
     }
+    layout_records
+}
 
-    // The dimension styles, by name.
+/// The dimension styles by name.
+fn dim_style_records_of(
+    rows: &[crate::tables::DimStyle],
+    page: CodePage,
+    notes: &mut Notes,
+) -> BTreeMap<String, DimStyleRecord> {
     let mut dim_style_records: BTreeMap<String, DimStyleRecord> = BTreeMap::new();
-    for d in &dim_style_rows {
+    for d in rows {
         let (Some(name), Some(post)) = (characters(&d.name, page), characters(&d.post, page))
         else {
             notes.add("dimension style in a code page that is not read");
@@ -749,10 +1016,17 @@ pub fn read_database_with_facts(
             },
         );
     }
+    dim_style_records
+}
 
-    // The image definitions, by handle (the key an image names its picture by).
+/// The image definitions by handle (the key an image names its picture by).
+fn image_definitions_of(
+    defs: &BTreeMap<u64, crate::tables::ImageDefinition>,
+    page: CodePage,
+    notes: &mut Notes,
+) -> BTreeMap<String, ImageDefinition> {
     let mut image_definitions: BTreeMap<String, ImageDefinition> = BTreeMap::new();
-    for (handle, def) in &image_defs {
+    for (handle, def) in defs {
         let file_path = match characters(&def.file_path, page) {
             Some(p) => Some(p),
             None => {
@@ -771,40 +1045,7 @@ pub fn read_database_with_facts(
             },
         );
     }
-
-    let vars = drawing.variables();
-    let header = ModelHeader {
-        insunits: Some(vars.insertion_units as u16),
-        fingerprintguid: characters(&vars.fingerprint_guid, page),
-        versionguid: characters(&vars.version_guid, page),
-        pdmode: Some(vars.point_mode),
-        pdsize: Some(vars.point_size),
-    };
-
-    let current_layer = layers
-        .get(&vars.current_layer)
-        .and_then(|layer| characters(&layer.name, page));
-    let facts = DrawingFacts {
-        version,
-        code_page: drawing.code_page(),
-        variables: vars.clone(),
-        measurement: drawing.measurement(),
-        current_layer,
-    };
-    let database = CadDatabase {
-        entities: top_level,
-        tables: Tables {
-            layers: layer_records,
-            block_records,
-            image_definitions,
-            dim_styles: dim_style_records,
-            mlinestyles: mline_style_records,
-            layouts: layout_records,
-        },
-        header,
-        read_diagnostics: notes.into_diagnostics(),
-    };
-    Ok((database, facts))
+    image_definitions
 }
 
 #[cfg(test)]
