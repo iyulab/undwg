@@ -628,9 +628,10 @@ pub(super) fn convert_entity(
                     extension1: d.point13.map(point),
                     extension2: d.point14.map(point),
                     radial: d.point15.map(point),
+                    // The record stores the first leader point whether or not the
+                    // dimension has a leader, and the DXF twin writes the same point.
                     arc: match &d.arc {
-                        Some(a) if a.has_leader => Some(point(a.leader_point1)),
-                        Some(_) => None,
+                        Some(a) => Some(point(a.leader_point1)),
                         None => d.point16.map(at_elevation),
                     },
                 },

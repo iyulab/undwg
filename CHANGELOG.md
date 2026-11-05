@@ -17,6 +17,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 - `read_database` lists an insertion's attributes at the top level as well, right after the insertion, as the model's contract says.
 - Arc-length dimensions are read in R2000 files too: the class can occur there.
+- The arc point of an arc-length dimension without a leader is the first leader point the record stores, as it is for one with a leader (the record keeps the point either way).
 - The header-variable reader accepts up to one whole padding byte after the last handle's byte boundary (R2007 files leave one).
 
 ### Removed
