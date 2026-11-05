@@ -733,23 +733,20 @@ fn read_mleader_style_fields(
 pub struct TableStyle {
     /// The style's handle.
     pub handle: u64,
-    /// The flow direction: `0` down, `1` up.
-    pub flow: i16,
+    /// The flow direction: `0` down, `1` up; `None` when the style states none.
+    pub flow: Option<i16>,
 }
 
-/// Reads the table style at `entry` as R2000 to R2007 write it; `Ok(None)` when
-/// the object is of another kind or of a version whose layout this reader does
-/// not read. The fields are those of the public file specification and must fill
-/// the object's main data exactly.
+/// Reads the table style at `entry`; `Ok(None)` when the object is of another
+/// kind. The fields are those of the public file specification; before R2010
+/// they must fill the object's main data exactly, and from R2010 only the part
+/// the flow direction needs is read.
 pub fn read_table_style(
     objects: &[u8],
     entry: ObjectEntry,
     version: Version,
     classes: &[ClassDef],
 ) -> Result<Option<TableStyle>, ObjectError> {
-    if version >= Version::R2010 {
-        return Ok(None);
-    }
     let is_style = |code: u16| {
         code >= 500
             && classes
@@ -765,12 +762,17 @@ pub fn read_table_style(
         s.seek(from);
         s
     });
-    let flow = read_table_style_fields(&mut r, &mut strings, version)?;
-    if r.position() != layout.main_end {
-        return Err(ObjectError::Unexpected {
-            what: "table style main data length",
-        });
-    }
+    let flow = if version < Version::R2010 {
+        let flow = Some(read_table_style_fields(&mut r, &mut strings, version)?);
+        if r.position() != layout.main_end {
+            return Err(ObjectError::Unexpected {
+                what: "table style main data length",
+            });
+        }
+        flow
+    } else {
+        crate::table::read_table_style_content(&mut r, &mut strings)?
+    };
     Ok(Some(TableStyle {
         handle: entry.handle,
         flow,

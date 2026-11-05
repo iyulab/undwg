@@ -2172,8 +2172,7 @@ pub fn read_entity_with_classes(
     // A table is an object of a class; the versions whose layout this reader
     // knows read it whole, and a table that does not read stays an entity of a
     // kind this reader does not read.
-    if version < Version::R2010
-        && frame.type_code >= 500
+    if frame.type_code >= 500
         && classes.iter().any(|c| {
             i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "ACAD_TABLE"
         })

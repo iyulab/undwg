@@ -292,7 +292,9 @@ pub fn read_database_with_facts(
         }
         match read_table_style(objects, *e, version, drawing.classes()) {
             Ok(Some(style)) => {
-                table_styles.insert(e.handle, style.flow);
+                if let Some(flow) = style.flow {
+                    table_styles.insert(e.handle, flow);
+                }
                 continue;
             }
             Ok(None) => {}

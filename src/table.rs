@@ -70,11 +70,6 @@ pub(crate) fn read_table_entity(
     entry: ObjectEntry,
     version: Version,
 ) -> Result<Entity, ObjectError> {
-    if version >= Version::R2010 {
-        return Err(ObjectError::Unexpected {
-            what: "table version",
-        });
-    }
     let (_, mut r, layout) = open_object(objects, entry, version)?;
     let (common, flags) = read_common(&mut r, version)?;
     if common.handle != entry.handle {
@@ -87,7 +82,11 @@ pub(crate) fn read_table_entity(
         s.seek(from);
         s
     });
-    let (mut table, owned, cell_plan) = read_fields(&mut r, &mut strings, version)?;
+    let (mut table, owned, cell_plan) = if version >= Version::R2010 {
+        read_fields_content(&mut r, &mut strings, version)?
+    } else {
+        read_fields(&mut r, &mut strings, version)?
+    };
     if r.position() != layout.main_end {
         return Err(ObjectError::Unexpected {
             what: "table data length",
@@ -131,6 +130,23 @@ struct CellPlan {
     cells: Vec<CellHandles>,
     /// The text styles the table overrides.
     style_handles: usize,
+    /// R2010 and later: the handles the content states, in the order its
+    /// fields do (the last is the table style); empty before.
+    slots: Vec<Slot>,
+}
+
+/// A handle a field of the table content leaves for the handle stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Unknown,
+    DataLink,
+    Field,
+    Block,
+    AttributeDefinition,
+    TextStyle,
+    LineType,
+    FieldOwner,
+    TableStyle,
 }
 
 /// The fields of a table; the table with its own handles still unread, the
@@ -183,6 +199,7 @@ fn read_fields(
         CellPlan {
             cells: plan,
             style_handles,
+            slots: Vec::new(),
         },
     ))
 }
@@ -263,7 +280,7 @@ fn read_value(
     strings: &mut Option<BitReader<'_>>,
 ) -> Result<(Option<i32>, Option<TextValue>), BitError> {
     let flags = r.bit_long()?;
-    let kind = r.bit_long()?;
+    let mut kind = r.bit_long()?;
     let mut text = None;
     if flags & 1 == 0 {
         match kind {
@@ -294,8 +311,16 @@ fn read_value(
             }
             8 | 16 | 32 | 512 => {
                 let size = bounded_count(r, "table value size")?;
+                let mut all_zero = true;
                 for _ in 0..size {
-                    r.raw_char()?;
+                    all_zero &= r.raw_char()? == 0;
+                }
+                // A general value of zero bytes states nothing: the cell is
+                // as empty as one with no value (measured on a real file,
+                // whose twin drawing states no value for the cell). Any other
+                // payload is not read, and the kind says so.
+                if kind == 512 && all_zero {
+                    kind = 0;
                 }
             }
             _ => {
@@ -447,6 +472,15 @@ fn read_handles(
         }
         table.insert.sequence_end = next(h)?;
     }
+    if version >= Version::R2010 {
+        for slot in &plan.slots {
+            let handle = next(h)?;
+            if *slot == Slot::TableStyle {
+                table.style = handle;
+            }
+        }
+        return Ok(());
+    }
     table.style = next(h)?;
     for cell in &plan.cells {
         next(h)?; // the cell's field or block
@@ -461,4 +495,371 @@ fn read_handles(
         next(h)?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// R2010 and later: the table keeps its content in an embedded content
+// structure.
+
+/// The fields of a table of R2010 and later: the placement, the embedded
+/// content (columns, rows, cells, merged ranges), the direction and the break
+/// data.
+fn read_fields_content(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+) -> Result<(Table, usize, CellPlan), BitError> {
+    let mut slots = Vec::new();
+    let (mut insert, owned) = read_insert(r, version)?;
+    insert.block = 0;
+    r.raw_char()?; // unknown
+    slots.push(Slot::Unknown);
+    r.bit_long()?; // unknown
+    if version == Version::R2010 {
+        r.bit()?; // unknown
+    }
+    if version >= Version::R2013 {
+        r.bit_long()?; // unknown
+    }
+    let content = read_content(r, strings, &mut slots)?;
+    r.bit_short()?; // unknown
+    let direction = r.point_3bd()?;
+    if r.bit_long()? != 0 {
+        r.bit_long()?; // the option flags
+        r.bit_long()?; // the flow direction of the breaks
+        r.bit_double()?; // the break spacing
+        r.bit_long()?; // unknown flags
+        r.bit_long()?; // unknown flags
+        let manual = bounded_count(r, "table manual position count")?;
+        for _ in 0..manual {
+            r.point_3bd()?;
+            r.bit_double()?;
+            r.bit_long()?;
+        }
+    }
+    let ranges = bounded_count(r, "table break row range count")?;
+    for _ in 0..ranges {
+        r.point_3bd()?;
+        r.bit_long()?;
+        r.bit_long()?;
+    }
+    let (flow, cells) = content.cells_in_grid()?;
+    Ok((
+        Table {
+            insert,
+            flags: 0,
+            direction,
+            column_widths: content.column_widths,
+            row_heights: content.row_heights,
+            cells,
+            flow,
+            style: None,
+        },
+        owned,
+        CellPlan {
+            cells: Vec::new(),
+            style_handles: 0,
+            slots,
+        },
+    ))
+}
+
+/// What the embedded content states, before it is laid out as a grid.
+struct Content {
+    column_widths: Vec<f64>,
+    row_heights: Vec<f64>,
+    /// Per row, per cell: the kind, the text, and the value kind.
+    rows: Vec<Vec<ContentCell>>,
+    /// The merged ranges: top row, left column, bottom row, right column.
+    merged: Vec<[i32; 4]>,
+    /// The table flows up (the table's own cell style says so).
+    flows_up: Option<bool>,
+}
+
+struct ContentCell {
+    block: bool,
+    text: Option<TextValue>,
+    value_kind: Option<i32>,
+}
+
+impl Content {
+    /// The cells row by row, with the spans and covered cells the merged
+    /// ranges give, and the flow the table's own cell style states.
+    fn cells_in_grid(&self) -> Result<(Option<i16>, Vec<TableCell>), BitError> {
+        let columns = self.column_widths.len();
+        let rows = self.row_heights.len();
+        if self.rows.len() != rows || self.rows.iter().any(|r| r.len() != columns) {
+            return Err(BitError::TooLong {
+                form: "table content grid",
+            });
+        }
+        let mut cells: Vec<TableCell> = self
+            .rows
+            .iter()
+            .flatten()
+            .map(|c| TableCell {
+                kind: if c.block { 2 } else { 1 },
+                merged: false,
+                span_columns: 1,
+                span_rows: 1,
+                text: None,
+                value_kind: Some(c.value_kind.unwrap_or(0)),
+                value_text: c.text.clone(),
+            })
+            .collect();
+        for &[top, left, bottom, right] in &self.merged {
+            let (top, left, bottom, right) = (
+                usize::try_from(top),
+                usize::try_from(left),
+                usize::try_from(bottom),
+                usize::try_from(right),
+            );
+            let (Ok(top), Ok(left), Ok(bottom), Ok(right)) = (top, left, bottom, right) else {
+                return Err(BitError::TooLong {
+                    form: "table merged range",
+                });
+            };
+            if top > bottom || left > right || bottom >= rows || right >= columns {
+                return Err(BitError::TooLong {
+                    form: "table merged range",
+                });
+            }
+            for row in top..=bottom {
+                for column in left..=right {
+                    let cell = &mut cells[row * columns + column];
+                    if (row, column) == (top, left) {
+                        cell.span_columns = (right - left + 1) as i32;
+                        cell.span_rows = (bottom - top + 1) as i32;
+                    } else {
+                        cell.merged = true;
+                    }
+                }
+            }
+        }
+        // The bit says the table flows up; its absence overrides nothing.
+        Ok(((self.flows_up == Some(true)).then_some(1), cells))
+    }
+}
+
+fn read_content(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    slots: &mut Vec<Slot>,
+) -> Result<Content, BitError> {
+    text_value(r, strings)?; // the name
+    text_value(r, strings)?; // the description
+    let columns = bounded_count(r, "table column count")?;
+    let mut column_widths = Vec::with_capacity(columns);
+    for _ in 0..columns {
+        text_value(r, strings)?; // the column name
+        r.bit_long()?; // custom data
+        read_custom_data(r, strings, slots)?;
+        read_cell_style(r, strings, slots)?;
+        r.bit_long()?; // the cell style the column is based on
+        column_widths.push(r.bit_double()?);
+    }
+    let row_count = bounded_count(r, "table row count")?;
+    let mut row_heights = Vec::with_capacity(row_count);
+    let mut rows = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        let cell_count = bounded_count(r, "table cell count")?;
+        let mut row = Vec::with_capacity(cell_count);
+        for _ in 0..cell_count {
+            row.push(read_content_cell(r, strings, slots)?);
+        }
+        r.bit_long()?; // custom data
+        read_custom_data(r, strings, slots)?;
+        read_cell_style(r, strings, slots)?;
+        r.bit_long()?; // the cell style the row is based on
+        row_heights.push(r.bit_double()?);
+        rows.push(row);
+    }
+    let fields = bounded_count(r, "table field count")?;
+    for _ in 0..fields {
+        slots.push(Slot::FieldOwner);
+    }
+    // The table's own cell style, over the table style's.
+    let flows_up = read_cell_style(r, strings, slots)?;
+    let merged_count = bounded_count(r, "table merged range count")?;
+    let mut merged = Vec::with_capacity(merged_count);
+    for _ in 0..merged_count {
+        merged.push([r.bit_long()?, r.bit_long()?, r.bit_long()?, r.bit_long()?]);
+    }
+    slots.push(Slot::TableStyle);
+    Ok(Content {
+        column_widths,
+        row_heights,
+        rows,
+        merged,
+        flows_up,
+    })
+}
+
+/// One cell of the content: the state, the contents, the cell style and the
+/// geometry.
+fn read_content_cell(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    slots: &mut Vec<Slot>,
+) -> Result<ContentCell, BitError> {
+    r.bit_long()?; // the state flags
+    text_value(r, strings)?; // the tooltip
+    r.bit_long()?; // custom data
+    read_custom_data(r, strings, slots)?;
+    if r.bit_long()? != 0 {
+        slots.push(Slot::DataLink);
+        r.bit_long()?; // the row count
+        r.bit_long()?; // the column count
+        r.bit_long()?; // unknown
+    }
+    let contents = bounded_count(r, "table cell content count")?;
+    let (mut block, mut text, mut value_kind) = (false, None, None);
+    for _ in 0..contents {
+        let kind = r.bit_long()?;
+        match kind {
+            1 => {
+                let (k, t) = read_value(r, strings)?;
+                value_kind = k;
+                text = t;
+            }
+            2 => slots.push(Slot::Field),
+            4 => {
+                slots.push(Slot::Block);
+                block = true;
+            }
+            _ => {}
+        }
+        let attributes = bounded_count(r, "table cell attribute count")?;
+        for _ in 0..attributes {
+            slots.push(Slot::AttributeDefinition);
+            text_value(r, strings)?; // the value
+            r.bit_long()?; // the index
+        }
+        if r.bit_short()? != 0 {
+            read_content_format(r, strings, slots)?;
+        }
+    }
+    read_cell_style(r, strings, slots)?;
+    r.bit_long()?; // the cell style the cell is based on
+    if r.bit_long()? != 0 {
+        r.bit_long()?; // unknown
+        r.bit_double()?; // unknown
+        r.bit_double()?; // unknown
+        let geometry = r.bit_long()?;
+        slots.push(Slot::Unknown);
+        if geometry != 0 {
+            r.point_3bd()?; // the distance to the top left
+            r.point_3bd()?; // the distance to the centre
+            for _ in 0..4 {
+                r.bit_double()?; // the content width and height, the width and the height
+            }
+            r.bit_long()?; // unknown flags
+        }
+    }
+    Ok(ContentCell {
+        block,
+        text,
+        value_kind,
+    })
+}
+
+/// A collection of custom data items: a name and a value each.
+fn read_custom_data(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    slots: &mut Vec<Slot>,
+) -> Result<(), BitError> {
+    let count = bounded_count(r, "table custom data count")?;
+    for _ in 0..count {
+        text_value(r, strings)?; // the name
+        let _ = slots;
+        read_value(r, strings)?;
+    }
+    Ok(())
+}
+
+/// The content format: the overrides a content or a cell style states over
+/// the style it is based on.
+fn read_content_format(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    slots: &mut Vec<Slot>,
+) -> Result<(), BitError> {
+    r.bit_long()?; // the property override flags
+    r.bit_long()?; // the property flags
+    r.bit_long()?; // the value data type
+    r.bit_long()?; // the value unit type
+    text_value(r, strings)?; // the format string
+    r.bit_double()?; // the rotation
+    r.bit_double()?; // the block scale
+    r.bit_long()?; // the alignment
+    read_full_color(r, strings)?; // the content colour
+    slots.push(Slot::TextStyle);
+    r.bit_double()?; // the text height
+    Ok(())
+}
+
+/// A cell style (of a cell, a row, a column or the table): its type, and when
+/// it carries data the overrides, the content format, the margins and the
+/// borders. Returns whether the style states that the table flows up, when it
+/// carries data at all.
+fn read_cell_style(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    slots: &mut Vec<Slot>,
+) -> Result<Option<bool>, BitError> {
+    r.bit_long()?; // the type
+    if r.bit_short()? == 0 {
+        return Ok(None);
+    }
+    let overrides = r.bit_long()? as u32;
+    r.bit_long()?; // the merge flags
+    read_full_color(r, strings)?; // the background colour
+    r.bit_long()?; // the content layout flags
+    read_content_format(r, strings, slots)?;
+    if r.bit_short()? & 1 != 0 {
+        for _ in 0..6 {
+            r.bit_double()?; // the margins and the spacings
+        }
+    }
+    let borders = bounded_count(r, "table border count")?;
+    for _ in 0..borders {
+        if r.bit_long()? != 0 {
+            r.bit_long()?; // the override flags
+            r.bit_long()?; // the border type
+            read_full_color(r, strings)?;
+            r.bit_long()?; // the line weight
+            slots.push(Slot::LineType);
+            r.bit_long()?; // the invisibility
+            r.bit_double()?; // the double line spacing
+        }
+    }
+    Ok(Some(overrides & 0x10000 != 0))
+}
+
+/// The fields of a table style of R2010 and later, as far as a table needs
+/// them: whether the style says the table flows up (`Some(1)`) or down
+/// (`Some(0)`) -- by the property bit of its own cell style, the style of type
+/// "table" -- and `None` when that cell style carries no data or the fields
+/// after it are not the ones the specification lists (the cell style id, the
+/// class, the name, and the three cell styles that follow). The three cell
+/// styles of title, header and data are not read: their layout in real files
+/// differs from the specification and the flow does not depend on them.
+pub(crate) fn read_table_style_content(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+) -> Result<Option<i16>, BitError> {
+    let mut slots = Vec::new();
+    r.raw_char()?; // unknown
+    text_value(r, strings)?; // the description
+    r.bit_long()?; // unknown
+    r.bit_long()?; // unknown
+    let flows_up = read_cell_style(r, strings, &mut slots)?; // the table's cell style
+    let id = r.bit_long()?; // the cell style id: 4 is the table
+    let class = r.bit_long()?; // the cell style class
+    let count = r.bit_long()?; // the cell styles that follow: title, header, data
+    if id != 4 || !(1..=2).contains(&class) || count != 3 {
+        return Ok(None);
+    }
+    Ok(flows_up.map(i16::from))
 }

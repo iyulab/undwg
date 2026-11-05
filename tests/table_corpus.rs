@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use undwg::{read_entity_with_classes, read_table_style, Drawing, Geometry, Version};
+use undwg::{read_entity_with_classes, read_table_style, Drawing, Geometry};
 
 fn dwg_files(dir: &Path, into: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -66,7 +66,6 @@ fn every_table_of_an_r2000_to_r2007_file_reads_whole() {
             match &entity.geometry {
                 Geometry::Table(t) => {
                     read += 1;
-                    assert!(version < Version::R2010, "{}", path.display());
                     assert_eq!(
                         t.cells.len(),
                         t.column_widths.len() * t.row_heights.len(),
@@ -82,6 +81,24 @@ fn every_table_of_an_r2000_to_r2007_file_reads_whole() {
                         path.display()
                     );
                     checked += t.cells.len();
+                    if std::env::var_os("UNDWG_TABLES").is_some() {
+                        let mut kinds = std::collections::BTreeMap::new();
+                        for c in &t.cells {
+                            *kinds.entry((c.kind, c.value_kind)).or_insert(0usize) += 1;
+                        }
+                        eprintln!("  cell kinds {kinds:?}");
+                        let texts: std::collections::BTreeSet<_> = t
+                            .cells
+                            .iter()
+                            .filter_map(|c| c.value_text.as_ref().map(|v| format!("{v:?}")))
+                            .collect();
+                        eprintln!("  value texts {texts:?}");
+                        for (i, c) in t.cells.iter().enumerate() {
+                            if c.value_kind == Some(512) || c.merged || c.span_columns != 1 {
+                                eprintln!("  cell {i}: {c:?}");
+                            }
+                        }
+                    }
                     if std::env::var_os("UNDWG_TABLES").is_some() {
                         eprintln!(
                             "{} {:?} {}x{} flow={:?} style={:?} flags={:#x}",
