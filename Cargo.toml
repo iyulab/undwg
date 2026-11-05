@@ -1,6 +1,6 @@
 [package]
 name = "undwg"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # Minimum supported Rust version. Measured, not guessed -- raise it only with
 # a CI job that builds with exactly this toolchain.
