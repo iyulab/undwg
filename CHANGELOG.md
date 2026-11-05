@@ -4,6 +4,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-05
+
 ### Added
 
 - `PolylinePface`, `PolylineMesh`, `VertexFace` and the mesh vertex types: the polyface mesh and the polygon mesh with the vertices and faces they own. `read_database` converts them to the wireframe the model carries for a mesh -- a polyface mesh's faces edge by edge, a polygon mesh's grid lines row by row, then column by column -- and a mesh whose vertex count is not `m * n` is reported as not read, not guessed.

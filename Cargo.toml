@@ -1,6 +1,6 @@
 [package]
 name = "undwg"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 # Minimum supported Rust version. Measured, not guessed -- raise it only with
 # a CI job that builds with exactly this toolchain.
@@ -9,10 +9,9 @@ license = "MIT"
 repository = "https://github.com/iyulab/undwg"
 homepage = "https://github.com/iyulab/undwg"
 readme = "README.md"
-description = "A pure-Rust DWG reader built from the public file specification: R2000 to R2018 in, nothing guessed."
+description = "A pure-Rust DWG reader built from the public file specification: R2000, R2004 and R2010 to R2018 in, nothing guessed."
 keywords = ["cad", "dwg", "parser"]
 categories = ["parser-implementations", "data-structures"]
-publish = false
 
 [lints.rust]
 # Bytes in, plain data out: there is no reason for `unsafe` here.
