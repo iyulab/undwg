@@ -6,8 +6,16 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Added
 
-- `FileHeader::R2007`, `HeaderR2007`, `read_header_r2007`, `read_directory_r2007`, `read_section_r2007` and the types of the directory (`Directory2007`, `Section2007`, `SectionPage2007`, `PageMapEntry2007`): the container of R2007 (`AC1021`) files. The file header is an error-corrected block; the page map and the section map are Reed-Solomon coded system pages; data pages use a second Reed-Solomon code and R2007's own variant of LZ77. The parity of every codeword is checked, not used to correct, and the 32-bit checksum of every data page is verified, so a damaged page is an error that says which part is wrong. `read_header` now reads an R2007 header instead of naming it as not yet read, and `Drawing::open` reads the container of an R2007 file and then stops at the class definitions, which are not read yet (`ClassError::NotRead`). Every R2007 file of the test corpus (19) assembles, each section to its stated size. The 64-bit checks of the file header and the section map are not read: the parity and the page checksum already decide whether the bytes are intact.
+- `FileHeader::R2007`, `HeaderR2007`, `read_header_r2007`, `read_directory_r2007`, `read_section_r2007` and the types of the directory (`Directory2007`, `Section2007`, `SectionPage2007`, `PageMapEntry2007`): the container of R2007 (`AC1021`) files. The file header is an error-corrected block; the page map and the section map are Reed-Solomon coded system pages; data pages use a second Reed-Solomon code and R2007's own variant of LZ77. The parity of every codeword is checked, not used to correct, and the 32-bit checksum of every data page is verified, so a damaged page is an error that says which part is wrong. `read_header` now reads an R2007 header, and every reader that takes a version reads R2007: the class definitions and the header variables (strings in a string stream as from R2010, without R2010's second count), the object frames (the R2004 frame plus a string stream) and the entities, including the lock-position bit of an attribute, which R2007 states. `Drawing::open` and `read_database` open R2007 files. Every R2007 file of the test corpus (19) assembles, each section to its stated size, and reads into a model that agrees with the other reader's, entity by entity. The 64-bit checks of the file header and the section map are not read: the parity and the page checksum already decide whether the bytes are intact.
 - `HeaderError::Compression`: the compressed file header record of an R2007 file could not be decompressed.
+
+### Removed
+
+- `HeaderError::NotYetRead`, `ClassError::NotRead`, `VariablesError::NotRead` and `ObjectError::NotRead`: every version the reader names is read now.
+
+### Changed
+
+- The header-variable reader accepts up to one whole padding byte after the last handle's byte boundary (R2007 files leave one).
 
 ## [0.1.0] - 2026-11-05
 

@@ -11,7 +11,10 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use undwg::{read_classes, read_directory, read_header, read_section, FileHeader, Version};
+use undwg::{
+    read_classes, read_directory, read_directory_r2007, read_header, read_section,
+    read_section_r2007, FileHeader, Version,
+};
 
 fn dwg_files(dir: &Path, into: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -55,6 +58,16 @@ fn every_real_class_section_reads_and_is_plausible() {
                     .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
                     .unwrap_or_else(|| panic!("{}: no class section", path.display()));
                 (version, section)
+            }
+            Ok(FileHeader::R2007(header)) => {
+                let dir = read_directory_r2007(&bytes, &header)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                let get = |name: &str| {
+                    read_section_r2007(&bytes, &dir, name)
+                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                        .unwrap_or_else(|| panic!("{}: no {name}", path.display()))
+                };
+                (Version::R2007, get("AcDb:Classes"))
             }
             Ok(FileHeader::R2000(header)) => {
                 let section = header

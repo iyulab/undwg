@@ -25,9 +25,8 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | File header (R2000, R2004, R2010, R2013, R2018) with checksums | done |
 | File header of R2007: the error-corrected header block (Reed-Solomon parity checked, not used to correct) | done |
 | Page map, section map and data pages of R2007, with R2007's own decompressor (parity and 32-bit page checksum checked) | done |
-| Class definitions, header variables and objects of R2007 | planned |
 | Section page map, section map, decompression, section assembly (R2004 and later) | done |
-| Bit-coded values, class definitions (R2000, R2004 and later; R2007 excepted) | done |
+| Bit-coded values, class definitions (R2000, R2004 and later) | done |
 | Object map and object frames (R2000, R2004 and later; size, type, checksum) | done |
 | Lines, circles, arcs and points (R2000, R2004 and later) | done |
 | Lightweight polylines: vertices, bulges, widths, closed flag, plane (R2000, R2004 and later) | done |

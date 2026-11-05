@@ -60,8 +60,6 @@ pub enum ObjectError {
     },
     /// A value could not be read from the bit stream.
     Bits(BitError),
-    /// The version has no object reader.
-    NotRead(Version),
 }
 
 impl fmt::Display for ObjectError {
@@ -82,7 +80,6 @@ impl fmt::Display for ObjectError {
                 "{what} checksum mismatch: computed {computed:#06x}, the file stores {stored:#06x}"
             ),
             ObjectError::Bits(e) => e.fmt(f),
-            ObjectError::NotRead(v) => write!(f, "the objects of {v} are not read by this version"),
         }
     }
 }
@@ -213,10 +210,13 @@ pub(crate) fn open_object<'a>(
     entry: ObjectEntry,
     version: Version,
 ) -> Result<(ObjectFrame, BitReader<'a>, Layout), ObjectError> {
-    let from_r2010 = match version {
-        Version::R2000 | Version::R2004 => false,
-        Version::R2010 | Version::R2013 | Version::R2018 => true,
-        v => return Err(ObjectError::NotRead(v)),
+    // R2007 keeps the R2004 frame (a bit-short type and the size of the data in
+    // bits) and adds the string stream; R2010 replaces the size with the size of
+    // the handle stream and the type with a variable-length code.
+    let (from_r2007, from_r2010) = match version {
+        Version::R2000 | Version::R2004 => (false, false),
+        Version::R2007 => (true, false),
+        Version::R2010 | Version::R2013 | Version::R2018 => (true, true),
     };
     let start = usize::try_from(entry.offset).map_err(|_| ObjectError::Unexpected {
         what: "object offset",
@@ -295,7 +295,7 @@ pub(crate) fn open_object<'a>(
     .ok_or(ObjectError::Unexpected {
         what: "handle stream",
     })?;
-    let (main_end, strings) = if from_r2010 {
+    let (main_end, strings) = if from_r2007 {
         string_stream(&mut body, handle_start)?
     } else {
         (handle_start, None)

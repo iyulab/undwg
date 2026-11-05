@@ -51,8 +51,6 @@ pub enum VariablesError {
     },
     /// A value could not be read from the bit stream.
     Bits(BitError),
-    /// The version has no header-variable reader.
-    NotRead(Version),
 }
 
 impl fmt::Display for VariablesError {
@@ -67,9 +65,6 @@ impl fmt::Display for VariablesError {
                 "header variables checksum mismatch: computed {computed:#06x}, the file stores {stored:#06x}"
             ),
             VariablesError::Bits(e) => e.fmt(f),
-            VariablesError::NotRead(v) => {
-                write!(f, "the header variables of {v} are not read by this version")
-            }
         }
     }
 }
@@ -723,8 +718,7 @@ pub fn read_header_variables(
 ) -> Result<HeaderVariables, VariablesError> {
     let split = match version {
         Version::R2000 | Version::R2004 => false,
-        Version::R2010 | Version::R2013 | Version::R2018 => true,
-        v => return Err(VariablesError::NotRead(v)),
+        Version::R2007 | Version::R2010 | Version::R2013 | Version::R2018 => true,
     };
     let bad = |what| VariablesError::Unexpected { what };
     if section.len() < 20 || section[..16] != OPENING_SENTINEL {
@@ -810,8 +804,9 @@ pub fn read_header_variables(
     // Every stream must end where the format puts its end: the main stream at
     // the start of the string stream (or, with no string stream, at the end of
     // the data), the string stream at its size field, and the last stream
-    // within one byte of the data's end -- the writers pad it to a byte, and
-    // some leave a whole padding byte (real files of R2010 and one of R2000).
+    // within one byte of the data's end once padded to a byte boundary -- the
+    // writers pad it to a byte, and some leave a whole padding byte more (real
+    // files of R2007 and R2010, and one of R2000).
     let main_pos = st.main.position();
     if split {
         if main_pos != main_end {
@@ -823,7 +818,9 @@ pub fn read_header_variables(
             }
         }
         if let Some(h) = &st.handles {
-            if handle_end - h.position() > MAX_PADDING_BITS {
+            // Padded to a byte boundary, then (in some files) one whole byte more.
+            let aligned = h.position().div_ceil(8) * 8;
+            if handle_end.saturating_sub(aligned) > MAX_PADDING_BITS {
                 return Err(bad("handle stream length"));
             }
         }
@@ -1477,14 +1474,6 @@ mod tests {
         s.extend_from_slice(&crc.unwrap_or(right).to_le_bytes());
         s.extend_from_slice(&CLOSING_SENTINEL);
         s
-    }
-
-    #[test]
-    fn a_version_without_a_reader_is_named() {
-        assert_eq!(
-            read_header_variables(&framed(&[0; 8], None), Version::R2007),
-            Err(VariablesError::NotRead(Version::R2007))
-        );
     }
 
     #[test]

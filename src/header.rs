@@ -140,8 +140,6 @@ pub enum FileHeader {
 pub enum HeaderError {
     /// The version bytes are not a version this reader reads.
     Version(VersionError),
-    /// The layout of this version is documented but not read yet.
-    NotYetRead(Version),
     /// The file ends before the header does.
     Truncated {
         /// How many bytes the header needs.
@@ -174,9 +172,6 @@ impl fmt::Display for HeaderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             HeaderError::Version(e) => e.fmt(f),
-            HeaderError::NotYetRead(v) => {
-                write!(f, "the file header of {v} is not read by this version")
-            }
             HeaderError::Truncated { needed, len } => {
                 write!(
                     f,

@@ -1895,7 +1895,9 @@ fn read_attribute(
     let tag = text_value(r, strings)?;
     r.bit_short()?; // the field length, unused
     let flags = r.raw_char()?;
-    let position_locked = if version >= Version::R2010 {
+    // The lock-position bit is there from R2007; the second version byte of a
+    // definition from R2010.
+    let position_locked = if version >= Version::R2007 {
         r.bit()?
     } else {
         false

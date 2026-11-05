@@ -50,13 +50,8 @@ fn every_real_file_reads_into_a_consistent_drawing() {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let db = match undwg::read_database(&bytes) {
             Ok(db) => db,
-            // The versions before R2000 are named, not read; of R2007 the
-            // container is read but not yet its class and header sections.
-            Err(undwg::DatabaseError::Drawing(
-                undwg::DrawingError::Header(_)
-                | undwg::DrawingError::Classes(undwg::ClassError::NotRead(_))
-                | undwg::DrawingError::Variables(undwg::VariablesError::NotRead(_)),
-            )) => {
+            // The versions before R2000 are named, not read.
+            Err(undwg::DatabaseError::Drawing(undwg::DrawingError::Header(_))) => {
                 skipped += 1;
                 continue;
             }

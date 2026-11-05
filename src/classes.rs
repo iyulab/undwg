@@ -72,8 +72,6 @@ pub enum ClassError {
     /// A name is not text this reader can give: bytes that are not ASCII in a
     /// plain-text name, or UTF-16 that is not valid.
     Text,
-    /// The version has no class reader.
-    NotRead(Version),
 }
 
 impl fmt::Display for ClassError {
@@ -88,7 +86,6 @@ impl fmt::Display for ClassError {
             ),
             ClassError::Bits(e) => e.fmt(f),
             ClassError::Text => write!(f, "a class name is not valid text"),
-            ClassError::NotRead(v) => write!(f, "the class section of {v} is not read by this version"),
         }
     }
 }
@@ -113,11 +110,13 @@ fn u32_at(b: &[u8], at: usize) -> u32 {
 
 /// Reads the class definitions from the assembled `AcDb:Classes` section.
 pub fn read_classes(section: &[u8], version: Version) -> Result<Vec<ClassDef>, ClassError> {
-    let (unicode, r2000) = match version {
-        Version::R2000 => (false, true),
-        Version::R2004 => (false, false),
-        Version::R2010 | Version::R2013 | Version::R2018 => (true, false),
-        v => return Err(ClassError::NotRead(v)),
+    // `unicode`: the strings are in a string stream (R2007 and later);
+    // `extra_count`: a second count precedes the data (R2010 and later).
+    let (unicode, r2000, extra_count) = match version {
+        Version::R2000 => (false, true, false),
+        Version::R2004 => (false, false, false),
+        Version::R2007 => (true, false, false),
+        Version::R2010 | Version::R2013 | Version::R2018 => (true, false, true),
     };
     // Sentinel and byte count.
     if section.len() < 20 || section[..16] != OPENING_SENTINEL {
@@ -127,11 +126,11 @@ pub fn read_classes(section: &[u8], version: Version) -> Result<Vec<ClassDef>, C
     }
     let size = u32_at(section, 16) as usize;
     // From R2010 a second count precedes the data; it is zero in every file read.
-    let region_at = if unicode { 24 } else { 20 };
+    let region_at = if extra_count { 24 } else { 20 };
     if section.len() < region_at {
         return Err(ClassError::Unexpected { what: "length" });
     }
-    if unicode && u32_at(section, 20) != 0 {
+    if extra_count && u32_at(section, 20) != 0 {
         return Err(ClassError::Unexpected {
             what: "second count",
         });
@@ -309,14 +308,6 @@ fn read_unicode(r: &mut BitReader<'_>) -> Result<String, ClassError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_version_without_a_class_reader_is_named() {
-        assert_eq!(
-            read_classes(&[], Version::R2007),
-            Err(ClassError::NotRead(Version::R2007))
-        );
-    }
 
     #[test]
     fn a_section_without_the_opening_sentinel_is_refused() {

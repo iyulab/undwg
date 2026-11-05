@@ -13,10 +13,11 @@ use std::path::{Path, PathBuf};
 
 use undwg::{
     read_block_header, read_block_name, read_classes, read_dim_style, read_dimstyle_name,
-    read_directory, read_entity, read_entity_with_classes, read_header, read_header_variables,
-    read_image_definition, read_layer, read_linetype_name, read_mlinestyle_name, read_object_frame,
-    read_object_map, read_section, FileHeader, Geometry, HatchEdge, TextValue, Version,
-    TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE, TYPE_MLINESTYLE,
+    read_directory, read_directory_r2007, read_entity, read_entity_with_classes, read_header,
+    read_header_variables, read_image_definition, read_layer, read_linetype_name,
+    read_mlinestyle_name, read_object_frame, read_object_map, read_section, read_section_r2007,
+    FileHeader, Geometry, HatchEdge, TextValue, Version, TYPE_BLOCK_HEADER, TYPE_DIMSTYLE,
+    TYPE_LAYER, TYPE_LINETYPE, TYPE_MLINESTYLE,
 };
 
 /// A text as the dump writes it: `U:` and the hex of its UTF-8 for Unicode
@@ -137,6 +138,16 @@ fn every_real_line_circle_and_arc_reads() {
                 };
                 (version, get("AcDb:Handles"), get("AcDb:AcDbObjects"))
             }
+            Ok(FileHeader::R2007(header)) => {
+                let dir = read_directory_r2007(&bytes, &header)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                let get = |name: &str| {
+                    read_section_r2007(&bytes, &dir, name)
+                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                        .unwrap_or_else(|| panic!("{}: no {name}", path.display()))
+                };
+                (Version::R2007, get("AcDb:Handles"), get("AcDb:AcDbObjects"))
+            }
             Ok(FileHeader::R2000(header)) => {
                 let handles = header
                     .section(&bytes, 2)
@@ -151,6 +162,12 @@ fn every_real_line_circle_and_arc_reads() {
             Ok(FileHeader::R2004(_, header)) => {
                 let dir = read_directory(&bytes, &header).expect("directory");
                 read_section(&bytes, &dir, "AcDb:Classes").ok().flatten()
+            }
+            Ok(FileHeader::R2007(header)) => {
+                let dir = read_directory_r2007(&bytes, &header).expect("directory");
+                read_section_r2007(&bytes, &dir, "AcDb:Classes")
+                    .ok()
+                    .flatten()
             }
             Ok(FileHeader::R2000(header)) => {
                 header.section(&bytes, 1).ok().flatten().map(<[u8]>::to_vec)
@@ -194,6 +211,12 @@ fn every_real_line_circle_and_arc_reads() {
             Ok(FileHeader::R2004(_, header)) => {
                 let dir = read_directory(&bytes, &header).expect("directory");
                 read_section(&bytes, &dir, "AcDb:Header")
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                    .unwrap_or_else(|| panic!("{}: no header section", path.display()))
+            }
+            Ok(FileHeader::R2007(header)) => {
+                let dir = read_directory_r2007(&bytes, &header).expect("directory");
+                read_section_r2007(&bytes, &dir, "AcDb:Header")
                     .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
                     .unwrap_or_else(|| panic!("{}: no header section", path.display()))
             }

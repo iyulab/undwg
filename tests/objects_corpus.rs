@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use undwg::{
-    read_classes, read_directory, read_header, read_object_frame, read_object_map, read_section,
-    FileHeader, Version,
+    read_classes, read_directory, read_directory_r2007, read_header, read_object_frame,
+    read_object_map, read_section, read_section_r2007, FileHeader, Version,
 };
 
 fn dwg_files(dir: &Path, into: &mut Vec<PathBuf>) {
@@ -66,6 +66,21 @@ fn every_real_object_has_an_intact_frame_and_the_counts_match_the_class_table() 
                     };
                     (
                         version,
+                        get("AcDb:Classes"),
+                        get("AcDb:Handles"),
+                        get("AcDb:AcDbObjects"),
+                    )
+                }
+                Ok(FileHeader::R2007(header)) => {
+                    let dir = read_directory_r2007(&bytes, &header)
+                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    let get = |name: &str| {
+                        read_section_r2007(&bytes, &dir, name)
+                            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                            .unwrap_or_else(|| panic!("{}: no {name}", path.display()))
+                    };
+                    (
+                        Version::R2007,
                         get("AcDb:Classes"),
                         get("AcDb:Handles"),
                         get("AcDb:AcDbObjects"),
