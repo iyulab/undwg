@@ -124,3 +124,63 @@ fn every_table_of_an_r2000_to_r2007_file_reads_whole() {
     }
     eprintln!("tables read {read} (cells {checked}), unread {unread}");
 }
+
+/// A table whose bytes are damaged is read whole, or not read: never a panic and never an allocation the file's
+/// own size cannot back. The damage is a fixed sequence, so a failure repeats.
+#[test]
+fn damaged_tables_are_read_whole_or_not_at_all() {
+    let Some(roots) = std::env::var_os("UNDWG_CORPUS") else {
+        eprintln!("skipped: UNDWG_CORPUS is not set");
+        return;
+    };
+    let mut files = Vec::new();
+    for root in std::env::split_paths(&roots) {
+        dwg_files(&root, &mut files);
+    }
+    let (mut tried, mut read) = (0usize, 0usize);
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = |bound: usize| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 33) as usize) % bound
+    };
+    for path in &files {
+        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let Ok(drawing) = Drawing::open(&bytes) else {
+            continue;
+        };
+        let version = drawing.version();
+        let tables: Vec<_> = drawing
+            .entries()
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    read_entity_with_classes(drawing.objects(), **entry, version, drawing.classes()),
+                    Ok(Some(e)) if matches!(e.geometry, Geometry::Table(_))
+                )
+            })
+            .copied()
+            .collect();
+        for entry in tables {
+            let start = usize::try_from(entry.offset).expect("an offset");
+            for _ in 0..1500 {
+                let mut objects = drawing.objects().to_vec();
+                for _ in 0..1 + next(4) {
+                    let at = start + next(2048.min(objects.len() - start));
+                    objects[at] ^= 1 << next(8);
+                }
+                tried += 1;
+                let result = std::panic::catch_unwind(|| {
+                    read_entity_with_classes(&objects, entry, version, drawing.classes())
+                });
+                match result {
+                    Ok(Ok(Some(e))) if matches!(e.geometry, Geometry::Table(_)) => read += 1,
+                    Ok(_) => {}
+                    Err(_) => panic!("{}: a damaged table panicked", path.display()),
+                }
+            }
+        }
+    }
+    eprintln!("damaged tables {tried}, still read whole {read}");
+}
