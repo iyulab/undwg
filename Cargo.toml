@@ -29,4 +29,4 @@ iter_over_hash_type = "warn"
 encoding_rs = "0.8"
 # The model a drawing is read into. A version dependency, never a path: this
 # crate must build from a standalone checkout.
-uncad-model = "0.11.0"
+uncad-model = "0.12.0"
