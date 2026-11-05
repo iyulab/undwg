@@ -295,23 +295,7 @@ pub(super) fn convert_entity(
             common,
             position: point(p.position),
         }),
-        Geometry::LwPolyline(p) => Entity::LwPolyline(LwPolylineEntity {
-            common,
-            vertices: p
-                .vertices
-                .iter()
-                .map(|v| PolylineVertex {
-                    point: point2(v.point),
-                    bulge: v.bulge,
-                    start_width: v.start_width,
-                    end_width: v.end_width,
-                })
-                .collect(),
-            closed: p.closed,
-            const_width: p.const_width,
-            elevation: p.elevation,
-            extrusion: point(p.normal),
-        }),
+        Geometry::LwPolyline(p) => lw_polyline_entity(p, common),
         Geometry::Solid(s) | Geometry::Trace(s) => {
             let solid = SolidEntity {
                 common,
@@ -355,504 +339,654 @@ pub(super) fn convert_entity(
             corner4: point(f.corners[3]),
             invisible_edges: Face3DEntity::invisible_edges_from_bits(f.invisible_edges as u32),
         }),
-        Geometry::Text(t) => {
-            let t = convert_text(t, ctx, notes)?;
-            Entity::Text(TextEntity {
-                common,
-                start_point: t.start_point,
-                text_height: t.height,
-                text: t.value,
-                rotation: t.rotation,
-                horizontal_justification: t.horizontal,
-                vertical_justification: t.vertical,
-                alignment_point: t.alignment,
-                width_factor: t.width_factor,
-                oblique_angle: t.oblique,
-                style_name: t.style,
-                elevation: t.elevation,
-                extrusion: t.extrusion,
-            })
-        }
-        Geometry::Attdef(a) => {
-            let t = convert_text(&a.text, ctx, notes)?;
-            let Some(tag) = characters(&a.tag, ctx.page) else {
-                notes.add("attribute tag in a code page that is not read");
-                return None;
-            };
-            Entity::Attdef(AttdefEntity {
-                common,
-                start_point: t.start_point,
-                text_height: t.height,
-                tag,
-                flags: attribute_flags(a.flags),
-                default_value: t.value,
-                rotation: t.rotation,
-                horizontal_justification: t.horizontal,
-                vertical_justification: t.vertical,
-                alignment_point: t.alignment,
-                width_factor: t.width_factor,
-                oblique_angle: t.oblique,
-                style_name: t.style,
-                elevation: t.elevation,
-                extrusion: t.extrusion,
-            })
-        }
-        Geometry::Insert(i) => {
-            // R2000 names the first and the last attribute and links the rest;
-            // later versions list them all.
-            let handles = match (ctx.version, i.attributes.first(), i.attributes.last()) {
-                (Version::R2000, Some(first), Some(last)) => chain(ctx, *first, *last, notes),
-                _ => i.attributes.clone(),
-            };
-            Entity::Insert(InsertEntity {
-                common,
-                block_name: match ctx.block_names.get(&i.block) {
-                    Some(n) => Ref::Resolved(n.clone()),
-                    None => Ref::Unresolved(hex(i.block)),
-                },
-                insertion_point: point(i.position),
-                scale: point(i.scale),
-                rotation: i.rotation,
-                attribs: handles
-                    .iter()
-                    .filter_map(|h| attribs.get(h).cloned())
-                    .collect(),
-                extrusion: point(i.extrusion),
-            })
-        }
-        Geometry::Table(t) => Entity::AcadTable(AcadTableEntity {
-            common,
-            block_name: match ctx.block_names.get(&t.insert.block) {
-                Some(n) => Ref::Resolved(n.clone()),
-                None => Ref::Unresolved(hex(t.insert.block)),
-            },
-            insertion_point: point(t.insert.position),
-            scale: point(t.insert.scale),
-            rotation: t.insert.rotation,
-            grid: table_grid(t, ctx.page, notes),
-            flow: t
-                .flow
-                .or_else(|| t.style.and_then(|s| ctx.table_styles.get(&s).copied()))
-                .and_then(|code| TableFlow::from_code(i64::from(code))),
-        }),
-        Geometry::Mtext(m) => {
-            let Some(text) = characters(&m.value, ctx.page) else {
-                notes.add("text in a code page that is not read");
-                return None;
-            };
-            let style_name = match ctx.styles.get(&m.style) {
-                None => Ref::Unresolved(hex(m.style)),
-                Some(n) => match characters(n, ctx.page) {
-                    Some(n) => Ref::Resolved(n),
-                    None => Ref::Unresolved(hex(m.style)),
-                },
-            };
-            Entity::MText(MTextEntity {
-                common,
-                insertion_point: point(m.insertion),
-                text,
-                text_height: m.text_height,
-                rotation: m.x_axis[1].atan2(m.x_axis[0]),
-                line_spacing_factor: m.line_spacing_factor,
-                attachment: MTextAttachment::from_code(i64::from(m.attachment)),
-                reference_width: m.rect_width,
-                extents_width: Some(m.extents_width),
-                extents_height: Some(m.extents_height),
-                style_name,
-            })
-        }
-        Geometry::Spline(s) => Entity::Spline(SplineEntity {
-            common,
-            degree: s.degree,
-            // A control-point spline states whether it is closed and periodic; a
-            // fit-point spline states closed from R2013 (its flag), and no periodic.
-            closed: if s.fit_data {
-                (ctx.version >= Version::R2013).then_some(s.flags & 4 != 0)
-            } else {
-                Some(s.closed)
-            },
-            periodic: (!s.fit_data).then_some(s.periodic),
-            knots: s.knots.clone(),
-            weights: s.weights.clone(),
-            fit_points: s.fit_points.iter().copied().map(point).collect(),
-            control_points: s.control_points.iter().copied().map(point).collect(),
-            start_tangent: tangent(s.start_tangent),
-            end_tangent: tangent(s.end_tangent),
-        }),
-        Geometry::Polyline2d(p) => {
-            let vertices: Vec<PolylineVertex> = owned(ctx, &p.vertices, notes)
-                .iter()
-                .filter_map(|h| ctx.vertices_2d.get(h))
-                .map(|v| PolylineVertex {
-                    point: Point2D {
-                        x: v.point[0],
-                        y: v.point[1],
-                    },
-                    bulge: v.bulge,
-                    start_width: v.start_width,
-                    end_width: v.end_width,
-                })
-                .collect();
-            Entity::Polyline2D(LwPolylineEntity {
-                common,
-                vertices,
-                closed: p.flags & 1 != 0,
-                const_width: 0.0,
-                elevation: p.elevation,
-                extrusion: point(p.extrusion),
-            })
-        }
-        Geometry::Polyline3d(p) => Entity::Polyline3D(PolylineEntity {
-            common,
-            vertices: owned(ctx, &p.vertices, notes)
-                .iter()
-                .filter_map(|h| ctx.vertices_3d.get(h))
-                .map(|v| point(v.point))
-                .collect(),
-            closed: p.closed_flags & 1 != 0,
-        }),
-        Geometry::PolylinePface(p) => {
-            let chain = owned(ctx, &p.vertices, notes);
-            let positions: Vec<Point3D> = chain
-                .iter()
-                .filter_map(|h| ctx.vertices_3d.get(h))
-                .map(|v| point(v.point))
-                .collect();
-            let faces: Vec<[i16; 4]> = chain
-                .iter()
-                .filter_map(|h| ctx.faces.get(h))
-                .map(|f| f.indices)
-                .collect();
-            let (wireframe_edges, skipped_edges) = pface_wireframe(&positions, &faces);
-            Entity::PolylinePFace(Solid3DEntity {
-                common,
-                wireframe_edges,
-                skipped_edges,
-            })
-        }
-        Geometry::PolylineMesh(p) => {
-            let positions: Vec<Point3D> = owned(ctx, &p.vertices, notes)
-                .iter()
-                .filter_map(|h| ctx.vertices_3d.get(h))
-                .map(|v| point(v.point))
-                .collect();
-            let count = |n: i16| usize::try_from(n).unwrap_or(0);
-            let (wireframe_edges, skipped_edges) = mesh_wireframe(
-                &positions,
-                count(p.m_count),
-                count(p.n_count),
-                p.flags & 1 != 0,
-                p.flags & 32 != 0,
-            );
-            Entity::PolylineMesh(Solid3DEntity {
-                common,
-                wireframe_edges,
-                skipped_edges,
-            })
-        }
-        Geometry::Tolerance(t) => {
-            let Some(text_value) = characters(&t.text, ctx.page) else {
-                notes.add("text in a code page that is not read");
-                return None;
-            };
-            Entity::Tolerance(ToleranceEntity {
-                common,
-                insertion_point: point(t.insertion),
-                text_height: None,
-                text_value,
-                direction: Some(point(t.x_direction)),
-                style_name: named(ctx.dim_styles, t.style, ctx.page),
-            })
-        }
-        Geometry::Mline(m) => Entity::MLine(MLineEntity {
-            common,
-            vertices: m
-                .vertices
-                .iter()
-                .map(|v| MLineVertex {
-                    point: point(v.point),
-                    miter_direction: point(v.miter),
-                })
-                .collect(),
-            closed: m.open_closed == 3,
-            mlinestyle_name: named(ctx.mline_styles, m.style, ctx.page),
-            scale: Some(m.scale),
-        }),
-        Geometry::Viewport(v) => Entity::Viewport(ViewportEntity {
-            common,
-            center: point(v.center),
-            width: v.width,
-            height: v.height,
-            view: Some(ViewportView {
-                center: point2(v.view_center),
-                height: v.view_height,
-                target: point(v.view_target),
-                direction: point(v.view_direction),
-                twist: v.view_twist,
-                lens_length: v.lens_length,
-            }),
-            on: Some(v.status_flags & 0x20000 == 0),
-            viewport_id: None,
-            frozen_layers: v
-                .frozen_layers
-                .iter()
-                .map(|h| match ctx.layers.get(h) {
-                    Some(n) => Ref::Resolved(n.clone()),
-                    None => Ref::Unresolved(hex(*h)),
-                })
-                .collect(),
-        }),
-        Geometry::Dimension(d) => {
-            let text_override = match characters(&d.user_text, ctx.page) {
-                None => {
-                    notes.add("text in a code page that is not read");
-                    return None;
-                }
-                Some(t) if t.is_empty() || t == "<>" => TextOverride::Measured,
-                Some(t) if t == " " => TextOverride::Suppressed,
-                Some(t) => TextOverride::Literal(t),
-            };
-            let at_elevation = |p: [f64; 2]| Point3D {
-                x: p[0],
-                y: p[1],
-                z: d.elevation,
-            };
-            Entity::Dimension(DimensionEntity {
-                common,
-                block_name: match d.block {
-                    None => Ref::Absent,
-                    Some(h) => match ctx.block_names.get(&h) {
-                        Some(n) => Ref::Resolved(n.clone()),
-                        None => Ref::Unresolved(hex(h)),
-                    },
-                },
-                kind: Some(match d.kind {
-                    entities::DimensionKind::Linear => ModelDimensionKind::Rotated,
-                    entities::DimensionKind::Aligned => ModelDimensionKind::Aligned,
-                    entities::DimensionKind::Angular2Line => ModelDimensionKind::Angular2Line,
-                    entities::DimensionKind::Diameter => ModelDimensionKind::Diameter,
-                    entities::DimensionKind::Radius => ModelDimensionKind::Radius,
-                    entities::DimensionKind::Angular3Point => ModelDimensionKind::Angular3Point,
-                    entities::DimensionKind::Ordinate => ModelDimensionKind::Ordinate,
-                    entities::DimensionKind::ArcLength => ModelDimensionKind::ArcLength,
-                }),
-                // A measurement is a length or an angle, never negative: a writer that
-                // did not measure the dimension stores -1.
-                measurement: (d.measurement >= 0.0).then_some(d.measurement),
-                text_override,
-                definition_point: Some(point(d.definition_point)),
-                text_midpoint: point2(d.text_midpoint),
-                points: DimensionPoints {
-                    extension1: d.point13.map(point),
-                    extension2: d.point14.map(point),
-                    radial: d.point15.map(point),
-                    // The record stores the first leader point whether or not the
-                    // dimension has a leader, and the DXF twin writes the same point.
-                    arc: match &d.arc {
-                        Some(a) => Some(point(a.leader_point1)),
-                        None => d.point16.map(at_elevation),
-                    },
-                },
-                rotation: d.rotation.unwrap_or(0.0),
-                text_rotation: d.text_rotation,
-                style_name: named(ctx.dim_styles, d.style, ctx.page),
-                ordinate_axis: d.ordinate_flags.map(|f| {
-                    if f & 1 != 0 {
-                        OrdinateAxis::X
-                    } else {
-                        OrdinateAxis::Y
-                    }
-                }),
-                style_overrides: Some(style_overrides(entity, ctx)),
-            })
-        }
-        Geometry::Hatch(h) => {
-            let gradient = match &h.gradient {
-                None => None,
-                Some(g) => match hatch_gradient(g, ctx.page) {
-                    Some(g) => Some(g),
-                    None => {
-                        notes.add(
-                            "hatch with a gradient that states no colour entity not converted",
-                        );
-                        return None;
-                    }
-                },
-            };
-            Entity::Hatch(HatchEntity {
-                common,
-                boundary_paths: h.paths.iter().map(hatch_path).collect(),
-                solid_fill: h.solid_fill,
-                gradient,
-                pattern_lines: h
-                    .pattern_lines
-                    .iter()
-                    .map(|l| HatchPatternLine {
-                        angle: l.angle,
-                        base_point: point2(l.base_point),
-                        offset: point2(l.offset),
-                        dash_pattern: l.dashes.clone(),
-                    })
-                    .collect(),
-                elevation: h.elevation,
-                extrusion: point(h.extrusion),
-                style: HatchStyle::from_code(i64::from(h.style)),
-            })
-        }
-        Geometry::Image(i) => {
-            let boundary = image_boundary(i);
-            Entity::Image(ImageEntity {
-                common,
-                insertion_point: point(i.insertion),
-                u_vector: point(i.u_vector),
-                v_vector: point(i.v_vector),
-                size_pixels: point2(i.size),
-                definition: match i.definition {
-                    Some(h) => Ref::Resolved(hex(h)),
-                    None => Ref::Absent,
-                },
-                display_flags: Some(i.display_flags as u16),
-                clipping: Some(i.clipping),
-                brightness: Some(i.brightness),
-                contrast: Some(i.contrast),
-                fade: Some(i.fade),
-                clip_outside: i.clip_mode,
-                boundary,
-            })
-        }
+        Geometry::Text(t) => text_entity(t, common, ctx, notes)?,
+        Geometry::Attdef(a) => attdef_entity(a, common, ctx, notes)?,
+        Geometry::Insert(i) => insert_entity(i, common, ctx, attribs, notes),
+        Geometry::Table(t) => table_entity(t, common, ctx, notes),
+        Geometry::Mtext(m) => mtext_entity(m, common, ctx, notes)?,
+        Geometry::Spline(s) => spline_entity(s, common, ctx),
+        Geometry::Polyline2d(p) => polyline_2d_entity(p, common, ctx, notes),
+        Geometry::Polyline3d(p) => polyline_3d_entity(p, common, ctx, notes),
+        Geometry::PolylinePface(p) => polyline_pface_entity(p, common, ctx, notes),
+        Geometry::PolylineMesh(p) => polyline_mesh_entity(p, common, ctx, notes),
+        Geometry::Tolerance(t) => tolerance_entity(t, common, ctx, notes)?,
+        Geometry::Mline(m) => mline_entity(m, common, ctx),
+        Geometry::Viewport(v) => viewport_entity(v, common, ctx),
+        Geometry::Dimension(d) => dimension_entity(d, common, entity, ctx, notes)?,
+        Geometry::Hatch(h) => hatch_entity(h, common, ctx, notes)?,
+        Geometry::Image(i) => image_entity(i, common),
         Geometry::Wipeout(i) => Entity::Wipeout(WipeoutEntity {
             common,
             boundary: image_boundary(i),
         }),
-        Geometry::Leader(l) => Entity::Leader(LeaderEntity {
-            common,
-            vertices: l.points.iter().copied().map(point).collect(),
-            has_arrowhead: Some(l.arrowhead),
-            path_type: Some(if l.path_type == 1 {
-                LeaderPath::Spline
-            } else {
-                LeaderPath::Straight
-            }),
-            annotation: match l.annotation_type {
-                0 => LeaderAnnotation::MText,
-                1 => LeaderAnnotation::Tolerance,
-                2 => LeaderAnnotation::Insert,
-                _ => LeaderAnnotation::Nothing,
-            },
-            annotation_id: match l.annotation {
-                Some(h) => Ref::Resolved(EntityId::new(h)),
-                None => Ref::Absent,
-            },
-            style_name: named(ctx.dim_styles, l.style, ctx.page),
-            style_overrides: Some(style_overrides(entity, ctx)),
-        }),
+        Geometry::Leader(l) => leader_entity(l, common, entity, ctx),
         // An entity of a kind this reader does not read keeps its common data and
         // the name the file gives it, as the model asks.
         Geometry::Unread(name) => Entity::Unknown {
             common,
             type_name: name.clone(),
         },
-        Geometry::MultiLeader(m) => {
-            // A root with no content has no last leader line point, and one the file
-            // marks without a dog-leg has none; a line of no point is no line.
-            let kept: Vec<&crate::multileader::MultiLeaderLine> = m
-                .roots
-                .iter()
-                .flat_map(|root| root.lines.iter())
-                .filter(|line| !line.points.is_empty())
-                .collect();
-            let leaders = m
-                .roots
-                .iter()
-                .map(|root| uncad_model::model::LeaderRoot {
-                    lines: root
-                        .lines
-                        .iter()
-                        .filter(|line| !line.points.is_empty())
-                        .map(|line| line.points.iter().copied().map(point).collect())
-                        .collect(),
-                    last_point: root.content_valid.then(|| point(root.connection_point)),
-                    dogleg: root.dog_leg_valid.then(|| uncad_model::model::Dogleg {
-                        direction: point(root.direction),
-                        length: root.landing_distance,
-                    }),
-                })
-                .collect();
-            let style_type = m
-                .style
-                .and_then(|h| ctx.mleader_styles.get(&h))
-                .map(|t| i64::from(*t));
-            let line_type = uncad_model::model::LeaderLineType::resolve(
-                Some(m.override_flags as u32),
-                Some(i64::from(m.line_type)),
-                style_type,
-                // A line states its own overrides from R2010; before that it states none.
-                kept.iter().map(|l| {
-                    if ctx.version >= Version::R2010 {
-                        (Some(l.override_flags as u32), Some(i64::from(l.line_type)))
-                    } else {
-                        (None, None)
-                    }
-                }),
-            );
-            let arrow_size = uncad_model::model::MultiLeaderEntity::resolve_arrow_size(
-                Some(m.arrow_head_size),
-                kept.iter().map(|l| {
-                    if ctx.version >= Version::R2010 {
-                        (Some(l.override_flags as u32), Some(l.arrow_size))
-                    } else {
-                        (None, None)
-                    }
-                }),
-            );
-            let content = match &m.content {
-                Some(crate::multileader::MultiLeaderContent::Text(t)) => {
-                    Some(uncad_model::model::MultiLeaderContent::MText(
-                        uncad_model::model::MultiLeaderText {
-                            text: t.text.clone(),
-                            style_name: named(ctx.styles, t.style, ctx.page),
-                            location: point(t.location),
-                            direction: point(t.direction),
-                            extrusion: point(t.normal),
-                            height: m.text_height,
-                            line_spacing_factor: t.line_spacing_factor,
-                            rotation: t.rotation,
-                            width: t.width,
-                            scale: m.scale,
-                            attachment: uncad_model::model::MTextAttachment::from_code(i64::from(
-                                t.alignment,
-                            )),
-                        },
-                    ))
-                }
-                Some(crate::multileader::MultiLeaderContent::Block(b)) => {
-                    Some(uncad_model::model::MultiLeaderContent::Block(
-                        uncad_model::model::MultiLeaderBlock {
-                            block_name: match b.record {
-                                None => Ref::Absent,
-                                Some(h) => match ctx.block_names.get(&h) {
-                                    Some(n) => Ref::Resolved(n.clone()),
-                                    None => Ref::Unresolved(hex(h)),
-                                },
-                            },
-                            location: point(b.location),
-                            scale: point(b.scale),
-                            rotation: b.rotation,
-                            extrusion: point(b.normal),
-                        },
-                    ))
-                }
-                None => None,
-            };
-            Entity::MultiLeader(uncad_model::model::MultiLeaderEntity {
-                common,
-                leaders,
-                line_type,
-                arrow_size,
-                content,
-            })
-        }
+        Geometry::MultiLeader(m) => multi_leader_entity(m, common, ctx),
         _ => return None,
+    })
+}
+
+/// The model entity for a lightweight polyline.
+fn lw_polyline_entity(p: &entities::LwPolyline, common: EntityCommon) -> Entity {
+    Entity::LwPolyline(LwPolylineEntity {
+        common,
+        vertices: p
+            .vertices
+            .iter()
+            .map(|v| PolylineVertex {
+                point: point2(v.point),
+                bulge: v.bulge,
+                start_width: v.start_width,
+                end_width: v.end_width,
+            })
+            .collect(),
+        closed: p.closed,
+        const_width: p.const_width,
+        elevation: p.elevation,
+        extrusion: point(p.normal),
+    })
+}
+
+/// The model entity for a line of text, or `None` when its text cannot be turned into characters.
+fn text_entity(
+    t: &entities::Text,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Option<Entity> {
+    let t = convert_text(t, ctx, notes)?;
+    Some(Entity::Text(TextEntity {
+        common,
+        start_point: t.start_point,
+        text_height: t.height,
+        text: t.value,
+        rotation: t.rotation,
+        horizontal_justification: t.horizontal,
+        vertical_justification: t.vertical,
+        alignment_point: t.alignment,
+        width_factor: t.width_factor,
+        oblique_angle: t.oblique,
+        style_name: t.style,
+        elevation: t.elevation,
+        extrusion: t.extrusion,
+    }))
+}
+
+/// The model entity for an attribute definition, or `None` when its text or tag is in a code page that is not read.
+fn attdef_entity(
+    a: &entities::Attribute,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Option<Entity> {
+    let t = convert_text(&a.text, ctx, notes)?;
+    let Some(tag) = characters(&a.tag, ctx.page) else {
+        notes.add("attribute tag in a code page that is not read");
+        return None;
+    };
+    Some(Entity::Attdef(AttdefEntity {
+        common,
+        start_point: t.start_point,
+        text_height: t.height,
+        tag,
+        flags: attribute_flags(a.flags),
+        default_value: t.value,
+        rotation: t.rotation,
+        horizontal_justification: t.horizontal,
+        vertical_justification: t.vertical,
+        alignment_point: t.alignment,
+        width_factor: t.width_factor,
+        oblique_angle: t.oblique,
+        style_name: t.style,
+        elevation: t.elevation,
+        extrusion: t.extrusion,
+    }))
+}
+
+/// The model entity for a block insertion, with the attributes it owns.
+fn insert_entity(
+    i: &entities::Insert,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    attribs: &BTreeMap<u64, AttribEntity>,
+    notes: &mut Notes,
+) -> Entity {
+    // R2000 names the first and the last attribute and links the rest;
+    // later versions list them all.
+    let handles = match (ctx.version, i.attributes.first(), i.attributes.last()) {
+        (Version::R2000, Some(first), Some(last)) => chain(ctx, *first, *last, notes),
+        _ => i.attributes.clone(),
+    };
+    Entity::Insert(InsertEntity {
+        common,
+        block_name: match ctx.block_names.get(&i.block) {
+            Some(n) => Ref::Resolved(n.clone()),
+            None => Ref::Unresolved(hex(i.block)),
+        },
+        insertion_point: point(i.position),
+        scale: point(i.scale),
+        rotation: i.rotation,
+        attribs: handles
+            .iter()
+            .filter_map(|h| attribs.get(h).cloned())
+            .collect(),
+        extrusion: point(i.extrusion),
+    })
+}
+
+/// The model entity for a table.
+fn table_entity(
+    t: &crate::table::Table,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Entity {
+    Entity::AcadTable(AcadTableEntity {
+        common,
+        block_name: match ctx.block_names.get(&t.insert.block) {
+            Some(n) => Ref::Resolved(n.clone()),
+            None => Ref::Unresolved(hex(t.insert.block)),
+        },
+        insertion_point: point(t.insert.position),
+        scale: point(t.insert.scale),
+        rotation: t.insert.rotation,
+        grid: table_grid(t, ctx.page, notes),
+        flow: t
+            .flow
+            .or_else(|| t.style.and_then(|s| ctx.table_styles.get(&s).copied()))
+            .and_then(|code| TableFlow::from_code(i64::from(code))),
+    })
+}
+
+/// The model entity for a multiline text, or `None` in a code page that is not read.
+fn mtext_entity(
+    m: &entities::Mtext,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Option<Entity> {
+    let Some(text) = characters(&m.value, ctx.page) else {
+        notes.add("text in a code page that is not read");
+        return None;
+    };
+    let style_name = match ctx.styles.get(&m.style) {
+        None => Ref::Unresolved(hex(m.style)),
+        Some(n) => match characters(n, ctx.page) {
+            Some(n) => Ref::Resolved(n),
+            None => Ref::Unresolved(hex(m.style)),
+        },
+    };
+    Some(Entity::MText(MTextEntity {
+        common,
+        insertion_point: point(m.insertion),
+        text,
+        text_height: m.text_height,
+        rotation: m.x_axis[1].atan2(m.x_axis[0]),
+        line_spacing_factor: m.line_spacing_factor,
+        attachment: MTextAttachment::from_code(i64::from(m.attachment)),
+        reference_width: m.rect_width,
+        extents_width: Some(m.extents_width),
+        extents_height: Some(m.extents_height),
+        style_name,
+    }))
+}
+
+/// The model entity for a spline.
+fn spline_entity(s: &entities::Spline, common: EntityCommon, ctx: &Context<'_>) -> Entity {
+    Entity::Spline(SplineEntity {
+        common,
+        degree: s.degree,
+        // A control-point spline states whether it is closed and periodic; a
+        // fit-point spline states closed from R2013 (its flag), and no periodic.
+        closed: if s.fit_data {
+            (ctx.version >= Version::R2013).then_some(s.flags & 4 != 0)
+        } else {
+            Some(s.closed)
+        },
+        periodic: (!s.fit_data).then_some(s.periodic),
+        knots: s.knots.clone(),
+        weights: s.weights.clone(),
+        fit_points: s.fit_points.iter().copied().map(point).collect(),
+        control_points: s.control_points.iter().copied().map(point).collect(),
+        start_tangent: tangent(s.start_tangent),
+        end_tangent: tangent(s.end_tangent),
+    })
+}
+
+/// The model entity for a 2D polyline, with the vertices it owns.
+fn polyline_2d_entity(
+    p: &entities::Polyline2d,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Entity {
+    let vertices: Vec<PolylineVertex> = owned(ctx, &p.vertices, notes)
+        .iter()
+        .filter_map(|h| ctx.vertices_2d.get(h))
+        .map(|v| PolylineVertex {
+            point: Point2D {
+                x: v.point[0],
+                y: v.point[1],
+            },
+            bulge: v.bulge,
+            start_width: v.start_width,
+            end_width: v.end_width,
+        })
+        .collect();
+    Entity::Polyline2D(LwPolylineEntity {
+        common,
+        vertices,
+        closed: p.flags & 1 != 0,
+        const_width: 0.0,
+        elevation: p.elevation,
+        extrusion: point(p.extrusion),
+    })
+}
+
+/// The model entity for a 3D polyline, with the vertices it owns.
+fn polyline_3d_entity(
+    p: &entities::Polyline3d,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Entity {
+    Entity::Polyline3D(PolylineEntity {
+        common,
+        vertices: owned(ctx, &p.vertices, notes)
+            .iter()
+            .filter_map(|h| ctx.vertices_3d.get(h))
+            .map(|v| point(v.point))
+            .collect(),
+        closed: p.closed_flags & 1 != 0,
+    })
+}
+
+/// The model entity for a polyface mesh, as its wireframe.
+fn polyline_pface_entity(
+    p: &entities::PolylinePface,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Entity {
+    let chain = owned(ctx, &p.vertices, notes);
+    let positions: Vec<Point3D> = chain
+        .iter()
+        .filter_map(|h| ctx.vertices_3d.get(h))
+        .map(|v| point(v.point))
+        .collect();
+    let faces: Vec<[i16; 4]> = chain
+        .iter()
+        .filter_map(|h| ctx.faces.get(h))
+        .map(|f| f.indices)
+        .collect();
+    let (wireframe_edges, skipped_edges) = pface_wireframe(&positions, &faces);
+    Entity::PolylinePFace(Solid3DEntity {
+        common,
+        wireframe_edges,
+        skipped_edges,
+    })
+}
+
+/// The model entity for a polygon mesh, as its wireframe.
+fn polyline_mesh_entity(
+    p: &entities::PolylineMesh,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Entity {
+    let positions: Vec<Point3D> = owned(ctx, &p.vertices, notes)
+        .iter()
+        .filter_map(|h| ctx.vertices_3d.get(h))
+        .map(|v| point(v.point))
+        .collect();
+    let count = |n: i16| usize::try_from(n).unwrap_or(0);
+    let (wireframe_edges, skipped_edges) = mesh_wireframe(
+        &positions,
+        count(p.m_count),
+        count(p.n_count),
+        p.flags & 1 != 0,
+        p.flags & 32 != 0,
+    );
+    Entity::PolylineMesh(Solid3DEntity {
+        common,
+        wireframe_edges,
+        skipped_edges,
+    })
+}
+
+/// The model entity for a tolerance frame, or `None` in a code page that is not read.
+fn tolerance_entity(
+    t: &entities::Tolerance,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Option<Entity> {
+    let Some(text_value) = characters(&t.text, ctx.page) else {
+        notes.add("text in a code page that is not read");
+        return None;
+    };
+    Some(Entity::Tolerance(ToleranceEntity {
+        common,
+        insertion_point: point(t.insertion),
+        text_height: None,
+        text_value,
+        direction: Some(point(t.x_direction)),
+        style_name: named(ctx.dim_styles, t.style, ctx.page),
+    }))
+}
+
+/// The model entity for a multiline.
+fn mline_entity(m: &entities::Mline, common: EntityCommon, ctx: &Context<'_>) -> Entity {
+    Entity::MLine(MLineEntity {
+        common,
+        vertices: m
+            .vertices
+            .iter()
+            .map(|v| MLineVertex {
+                point: point(v.point),
+                miter_direction: point(v.miter),
+            })
+            .collect(),
+        closed: m.open_closed == 3,
+        mlinestyle_name: named(ctx.mline_styles, m.style, ctx.page),
+        scale: Some(m.scale),
+    })
+}
+
+/// The model entity for a viewport.
+fn viewport_entity(v: &entities::Viewport, common: EntityCommon, ctx: &Context<'_>) -> Entity {
+    Entity::Viewport(ViewportEntity {
+        common,
+        center: point(v.center),
+        width: v.width,
+        height: v.height,
+        view: Some(ViewportView {
+            center: point2(v.view_center),
+            height: v.view_height,
+            target: point(v.view_target),
+            direction: point(v.view_direction),
+            twist: v.view_twist,
+            lens_length: v.lens_length,
+        }),
+        on: Some(v.status_flags & 0x20000 == 0),
+        viewport_id: None,
+        frozen_layers: v
+            .frozen_layers
+            .iter()
+            .map(|h| match ctx.layers.get(h) {
+                Some(n) => Ref::Resolved(n.clone()),
+                None => Ref::Unresolved(hex(*h)),
+            })
+            .collect(),
+    })
+}
+
+/// The model entity for a dimension, or `None` when its text override is in a code page that is not read.
+fn dimension_entity(
+    d: &entities::Dimension,
+    common: EntityCommon,
+    entity: &entities::Entity,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Option<Entity> {
+    let text_override = match characters(&d.user_text, ctx.page) {
+        None => {
+            notes.add("text in a code page that is not read");
+            return None;
+        }
+        Some(t) if t.is_empty() || t == "<>" => TextOverride::Measured,
+        Some(t) if t == " " => TextOverride::Suppressed,
+        Some(t) => TextOverride::Literal(t),
+    };
+    let at_elevation = |p: [f64; 2]| Point3D {
+        x: p[0],
+        y: p[1],
+        z: d.elevation,
+    };
+    Some(Entity::Dimension(DimensionEntity {
+        common,
+        block_name: match d.block {
+            None => Ref::Absent,
+            Some(h) => match ctx.block_names.get(&h) {
+                Some(n) => Ref::Resolved(n.clone()),
+                None => Ref::Unresolved(hex(h)),
+            },
+        },
+        kind: Some(match d.kind {
+            entities::DimensionKind::Linear => ModelDimensionKind::Rotated,
+            entities::DimensionKind::Aligned => ModelDimensionKind::Aligned,
+            entities::DimensionKind::Angular2Line => ModelDimensionKind::Angular2Line,
+            entities::DimensionKind::Diameter => ModelDimensionKind::Diameter,
+            entities::DimensionKind::Radius => ModelDimensionKind::Radius,
+            entities::DimensionKind::Angular3Point => ModelDimensionKind::Angular3Point,
+            entities::DimensionKind::Ordinate => ModelDimensionKind::Ordinate,
+            entities::DimensionKind::ArcLength => ModelDimensionKind::ArcLength,
+        }),
+        // A measurement is a length or an angle, never negative: a writer that
+        // did not measure the dimension stores -1.
+        measurement: (d.measurement >= 0.0).then_some(d.measurement),
+        text_override,
+        definition_point: Some(point(d.definition_point)),
+        text_midpoint: point2(d.text_midpoint),
+        points: DimensionPoints {
+            extension1: d.point13.map(point),
+            extension2: d.point14.map(point),
+            radial: d.point15.map(point),
+            // The record stores the first leader point whether or not the
+            // dimension has a leader, and the DXF twin writes the same point.
+            arc: match &d.arc {
+                Some(a) => Some(point(a.leader_point1)),
+                None => d.point16.map(at_elevation),
+            },
+        },
+        rotation: d.rotation.unwrap_or(0.0),
+        text_rotation: d.text_rotation,
+        style_name: named(ctx.dim_styles, d.style, ctx.page),
+        ordinate_axis: d.ordinate_flags.map(|f| {
+            if f & 1 != 0 {
+                OrdinateAxis::X
+            } else {
+                OrdinateAxis::Y
+            }
+        }),
+        style_overrides: Some(style_overrides(entity, ctx)),
+    }))
+}
+
+/// The model entity for a hatch, or `None` when a gradient states no colour.
+fn hatch_entity(
+    h: &entities::Hatch,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+    notes: &mut Notes,
+) -> Option<Entity> {
+    let gradient = match &h.gradient {
+        None => None,
+        Some(g) => match hatch_gradient(g, ctx.page) {
+            Some(g) => Some(g),
+            None => {
+                notes.add("hatch with a gradient that states no colour entity not converted");
+                return None;
+            }
+        },
+    };
+    Some(Entity::Hatch(HatchEntity {
+        common,
+        boundary_paths: h.paths.iter().map(hatch_path).collect(),
+        solid_fill: h.solid_fill,
+        gradient,
+        pattern_lines: h
+            .pattern_lines
+            .iter()
+            .map(|l| HatchPatternLine {
+                angle: l.angle,
+                base_point: point2(l.base_point),
+                offset: point2(l.offset),
+                dash_pattern: l.dashes.clone(),
+            })
+            .collect(),
+        elevation: h.elevation,
+        extrusion: point(h.extrusion),
+        style: HatchStyle::from_code(i64::from(h.style)),
+    }))
+}
+
+/// The model entity for an image.
+fn image_entity(i: &entities::Image, common: EntityCommon) -> Entity {
+    let boundary = image_boundary(i);
+    Entity::Image(ImageEntity {
+        common,
+        insertion_point: point(i.insertion),
+        u_vector: point(i.u_vector),
+        v_vector: point(i.v_vector),
+        size_pixels: point2(i.size),
+        definition: match i.definition {
+            Some(h) => Ref::Resolved(hex(h)),
+            None => Ref::Absent,
+        },
+        display_flags: Some(i.display_flags as u16),
+        clipping: Some(i.clipping),
+        brightness: Some(i.brightness),
+        contrast: Some(i.contrast),
+        fade: Some(i.fade),
+        clip_outside: i.clip_mode,
+        boundary,
+    })
+}
+
+/// The model entity for a leader.
+fn leader_entity(
+    l: &entities::Leader,
+    common: EntityCommon,
+    entity: &entities::Entity,
+    ctx: &Context<'_>,
+) -> Entity {
+    Entity::Leader(LeaderEntity {
+        common,
+        vertices: l.points.iter().copied().map(point).collect(),
+        has_arrowhead: Some(l.arrowhead),
+        path_type: Some(if l.path_type == 1 {
+            LeaderPath::Spline
+        } else {
+            LeaderPath::Straight
+        }),
+        annotation: match l.annotation_type {
+            0 => LeaderAnnotation::MText,
+            1 => LeaderAnnotation::Tolerance,
+            2 => LeaderAnnotation::Insert,
+            _ => LeaderAnnotation::Nothing,
+        },
+        annotation_id: match l.annotation {
+            Some(h) => Ref::Resolved(EntityId::new(h)),
+            None => Ref::Absent,
+        },
+        style_name: named(ctx.dim_styles, l.style, ctx.page),
+        style_overrides: Some(style_overrides(entity, ctx)),
+    })
+}
+
+/// The model entity for a multileader.
+fn multi_leader_entity(
+    m: &crate::multileader::MultiLeader,
+    common: EntityCommon,
+    ctx: &Context<'_>,
+) -> Entity {
+    // A root with no content has no last leader line point, and one the file
+    // marks without a dog-leg has none; a line of no point is no line.
+    let kept: Vec<&crate::multileader::MultiLeaderLine> = m
+        .roots
+        .iter()
+        .flat_map(|root| root.lines.iter())
+        .filter(|line| !line.points.is_empty())
+        .collect();
+    let leaders = m
+        .roots
+        .iter()
+        .map(|root| uncad_model::model::LeaderRoot {
+            lines: root
+                .lines
+                .iter()
+                .filter(|line| !line.points.is_empty())
+                .map(|line| line.points.iter().copied().map(point).collect())
+                .collect(),
+            last_point: root.content_valid.then(|| point(root.connection_point)),
+            dogleg: root.dog_leg_valid.then(|| uncad_model::model::Dogleg {
+                direction: point(root.direction),
+                length: root.landing_distance,
+            }),
+        })
+        .collect();
+    let style_type = m
+        .style
+        .and_then(|h| ctx.mleader_styles.get(&h))
+        .map(|t| i64::from(*t));
+    let line_type = uncad_model::model::LeaderLineType::resolve(
+        Some(m.override_flags as u32),
+        Some(i64::from(m.line_type)),
+        style_type,
+        // A line states its own overrides from R2010; before that it states none.
+        kept.iter().map(|l| {
+            if ctx.version >= Version::R2010 {
+                (Some(l.override_flags as u32), Some(i64::from(l.line_type)))
+            } else {
+                (None, None)
+            }
+        }),
+    );
+    let arrow_size = uncad_model::model::MultiLeaderEntity::resolve_arrow_size(
+        Some(m.arrow_head_size),
+        kept.iter().map(|l| {
+            if ctx.version >= Version::R2010 {
+                (Some(l.override_flags as u32), Some(l.arrow_size))
+            } else {
+                (None, None)
+            }
+        }),
+    );
+    let content = match &m.content {
+        Some(crate::multileader::MultiLeaderContent::Text(t)) => Some(
+            uncad_model::model::MultiLeaderContent::MText(uncad_model::model::MultiLeaderText {
+                text: t.text.clone(),
+                style_name: named(ctx.styles, t.style, ctx.page),
+                location: point(t.location),
+                direction: point(t.direction),
+                extrusion: point(t.normal),
+                height: m.text_height,
+                line_spacing_factor: t.line_spacing_factor,
+                rotation: t.rotation,
+                width: t.width,
+                scale: m.scale,
+                attachment: uncad_model::model::MTextAttachment::from_code(i64::from(t.alignment)),
+            }),
+        ),
+        Some(crate::multileader::MultiLeaderContent::Block(b)) => Some(
+            uncad_model::model::MultiLeaderContent::Block(uncad_model::model::MultiLeaderBlock {
+                block_name: match b.record {
+                    None => Ref::Absent,
+                    Some(h) => match ctx.block_names.get(&h) {
+                        Some(n) => Ref::Resolved(n.clone()),
+                        None => Ref::Unresolved(hex(h)),
+                    },
+                },
+                location: point(b.location),
+                scale: point(b.scale),
+                rotation: b.rotation,
+                extrusion: point(b.normal),
+            }),
+        ),
+        None => None,
+    };
+    Entity::MultiLeader(uncad_model::model::MultiLeaderEntity {
+        common,
+        leaders,
+        line_type,
+        arrow_size,
+        content,
     })
 }
 
