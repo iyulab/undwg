@@ -27,6 +27,7 @@ mod drawing;
 mod entities;
 mod header;
 mod lz;
+mod multileader;
 mod objects;
 mod sections;
 mod tables;
@@ -56,6 +57,10 @@ pub use header::{
     SECTION_PAGE_MAP_BIAS,
 };
 pub use lz::LzError;
+pub use multileader::{
+    MultiLeader, MultiLeaderArrowHead, MultiLeaderBlock, MultiLeaderBreak, MultiLeaderColor,
+    MultiLeaderContent, MultiLeaderLine, MultiLeaderRoot, MultiLeaderText,
+};
 pub use objects::{
     read_object_frame, read_object_map, ExtendedData, ObjectEntry, ObjectError, ObjectFrame,
 };

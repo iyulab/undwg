@@ -6,6 +6,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Added
 
+- `MultiLeader` and `Geometry::MultiLeader`: the multileader entity of R2010 and later -- its leader roots, each with the lines that
+  reach it (points, breaks, line type, colour, weight, arrowhead), the text or block it points out, and the settings the entity
+  states for itself. The fields follow the public file specification; every multileader of the corpus (47, R2010 to R2018) fills its
+  object's data exactly. The conversion to the model does not use it yet: a multileader still converts as an unknown entity.
 - `CodePage` and `Drawing::code_page`: a drawing before R2007 stores its text as bytes in the code page the file header declares
   by number, and `read_database` now turns text past ASCII into characters through that page. The public file specification
   gives no table of numbers, so only numbers observed against a second statement of the same drawing are known -- 28, 29 and

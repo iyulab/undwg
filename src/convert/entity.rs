@@ -624,6 +624,11 @@ pub(super) fn convert_entity(
             common,
             type_name: name.clone(),
         },
+        // Until the multileader is converted it is kept the way a kind that is not read is.
+        Geometry::MultiLeader(_) => Entity::Unknown {
+            common,
+            type_name: "MULTILEADER".to_string(),
+        },
         _ => return None,
     })
 }

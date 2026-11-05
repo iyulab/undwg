@@ -15,6 +15,7 @@
 
 use crate::bits::{BitError, BitReader, TextValue};
 use crate::classes::ClassDef;
+use crate::multileader::{read_multileader, MultiLeader, Slot};
 use crate::objects::{open_object, read_extended_data, ExtendedData, ObjectEntry, ObjectError};
 use crate::version::Version;
 
@@ -33,6 +34,7 @@ pub const TYPE_TEXT: u16 = 1;
 const TYPE_HATCH: u16 = 0x7001;
 const TYPE_IMAGE: u16 = 0x7002;
 const TYPE_WIPEOUT: u16 = 0x7003;
+const TYPE_MULTILEADER: u16 = 0x7004;
 
 /// The type code of a trace.
 pub const TYPE_TRACE: u16 = 32;
@@ -815,6 +817,8 @@ pub enum Geometry {
     Leader(Leader),
     /// A multiline.
     Mline(Mline),
+    /// A multileader (R2010 and later).
+    MultiLeader(Box<MultiLeader>),
 }
 
 /// An entity: its common data and its geometry.
@@ -1027,7 +1031,7 @@ fn read_arc(r: &mut BitReader<'_>) -> Result<Arc, BitError> {
 /// A count the stream states, bounded by what is left to read: every item
 /// takes at least one bit, so a count above the bits left is damaged data and
 /// must not allocate.
-fn bounded_count(r: &mut BitReader<'_>, what: &'static str) -> Result<usize, BitError> {
+pub(crate) fn bounded_count(r: &mut BitReader<'_>, what: &'static str) -> Result<usize, BitError> {
     let n = r.bit_long()?;
     usize::try_from(n)
         .ok()
@@ -1756,7 +1760,7 @@ fn read_mtext(
 
 /// A text value from where the version keeps it: the string stream from R2010,
 /// the main stream before.
-fn text_value(
+pub(crate) fn text_value(
     r: &mut BitReader<'_>,
     strings: &mut Option<BitReader<'_>>,
 ) -> Result<TextValue, BitError> {
@@ -2039,6 +2043,16 @@ pub fn read_entity_with_classes(
     {
         frame.type_code = TYPE_WIPEOUT;
     }
+    // A multileader is an object of a class too; this reader reads the layout
+    // of R2010 and later.
+    if version >= Version::R2010
+        && frame.type_code >= 500
+        && classes.iter().any(|c| {
+            i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "MULTILEADER"
+        })
+    {
+        frame.type_code = TYPE_MULTILEADER;
+    }
     if !matches!(
         frame.type_code,
         TYPE_ARC
@@ -2071,6 +2085,7 @@ pub fn read_entity_with_classes(
                 | TYPE_WIPEOUT
                 | TYPE_LEADER
                 | TYPE_MLINE
+                | TYPE_MULTILEADER
     ) {
         // An entity of a kind this reader does not read is still an entity:
         // its common data and references are read, and the kind is named.
@@ -2102,6 +2117,7 @@ pub fn read_entity_with_classes(
     let mut boundary_counts: Vec<usize> = Vec::new();
     let mut registered_application = false;
     let mut frozen_layer_count = 0usize;
+    let mut multileader_slots: Vec<Slot> = Vec::new();
     // From R2007 the text values of an entity are in its string stream.
     let mut strings = layout.strings.map(|(from, _)| {
         let mut s = r.clone();
@@ -2179,6 +2195,11 @@ pub fn read_entity_with_classes(
         TYPE_WIPEOUT => Geometry::Wipeout(read_image(&mut r, version)?),
         TYPE_LEADER => Geometry::Leader(read_leader(&mut r, version)?),
         TYPE_MLINE => Geometry::Mline(read_mline(&mut r)?),
+        TYPE_MULTILEADER => {
+            let (multileader, slots) = read_multileader(&mut r, &mut strings, version)?;
+            multileader_slots = slots;
+            Geometry::MultiLeader(Box::new(multileader))
+        }
         TYPE_VIEWPORT => {
             let (viewport, frozen) = read_viewport(&mut r, &mut strings, version)?;
             frozen_layer_count = frozen;
@@ -2273,6 +2294,12 @@ pub fn read_entity_with_classes(
     }
     if let Geometry::Mline(m) = &mut geometry {
         m.style = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
+    }
+    if let Geometry::MultiLeader(m) = &mut geometry {
+        for slot in multileader_slots {
+            let handle = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
+            m.set_slot(slot, handle);
+        }
     }
     if let Geometry::Leader(l) = &mut geometry {
         l.annotation = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
