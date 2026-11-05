@@ -500,7 +500,7 @@ fn every_real_line_circle_and_arc_reads() {
                 && !is_class(frame.type_code, "IMAGE")
                 && !is_class(frame.type_code, "MULTILEADER")
                 && !is_class(frame.type_code, "ARC_DIMENSION")
-                && !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 34 | 40 | 41 | 44 | 45 | 46 | 47 | 77)
+                && !matches!(frame.type_code, 1..=3 | 7 | 10..=16 | 17..=19 | 20..=26 | 27 | 28 | 29 | 30 | 31 | 32 | 35 | 36 | 34 | 40 | 41 | 44 | 45 | 46 | 47 | 77)
             {
                 continue;
             }
@@ -548,7 +548,14 @@ fn every_real_line_circle_and_arc_reads() {
                     Geometry::Attrib(_) => expect(owner, 7, "owner"),
                     // A vertex belongs to the polyline it is part of.
                     Geometry::Vertex2d(_) => expect(owner, 15, "owner"),
-                    Geometry::Vertex3d(_) => expect(owner, 16, "owner"),
+                    // ... a 3D polyline, a polygon mesh or a polyface mesh.
+                    Geometry::Vertex3d(_) => assert!(
+                        matches!(types.get(&owner), Some(16 | 29 | 30)),
+                        "{}: {:#x}: vertex owner {owner:#x}",
+                        path.display(),
+                        entry.handle
+                    ),
+                    Geometry::VertexFace(_) => expect(owner, 29, "owner"),
                     _ => expect(owner, 49, "owner"),
                 }
             }

@@ -401,6 +401,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     // The vertices of polylines, which the polyline that owns them takes.
     let mut vertices_2d: BTreeMap<u64, entities::Vertex2d> = BTreeMap::new();
     let mut vertices_3d: BTreeMap<u64, entities::Vertex3d> = BTreeMap::new();
+    let mut faces: BTreeMap<u64, entities::VertexFace> = BTreeMap::new();
     for entity in &read {
         match &entity.geometry {
             Geometry::Vertex2d(v) => {
@@ -408,6 +409,9 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             }
             Geometry::Vertex3d(v) => {
                 vertices_3d.insert(entity.common.handle, v.clone());
+            }
+            Geometry::VertexFace(f) => {
+                faces.insert(entity.common.handle, *f);
             }
             _ => {}
         }
@@ -427,6 +431,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         block_names: &block_names,
         vertices_2d: &vertices_2d,
         vertices_3d: &vertices_3d,
+        faces: &faces,
     };
 
     let viewport_handles: BTreeSet<u64> = read
@@ -492,6 +497,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
                 entity.geometry,
                 Geometry::Vertex2d(_)
                     | Geometry::Vertex3d(_)
+                    | Geometry::VertexFace(_)
                     | Geometry::Attrib(_)
                     | Geometry::Unread(_)
             ) {

@@ -10,8 +10,8 @@ use uncad_model::model::{
     HatchPatternLine, HatchStyle, HorizontalJustification, ImageEntity, InsertEntity,
     LeaderAnnotation, LeaderEntity, LeaderPath, LineEntity, LwPolylineEntity, MLineEntity,
     MLineVertex, MTextAttachment, MTextEntity, OrdinateAxis, Origin, Point2D, Point3D, PointEntity,
-    PolylineEntity, PolylineVertex, RayEntity, Ref, SolidEntity, SplineEntity, TextEntity,
-    TextOverride, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
+    PolylineEntity, PolylineVertex, RayEntity, Ref, Solid3DEntity, SolidEntity, SplineEntity,
+    TextEntity, TextOverride, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
     WipeoutEntity,
 };
 use uncad_model::Entity;
@@ -81,6 +81,7 @@ pub(super) struct Context<'a> {
     pub(super) block_names: &'a BTreeMap<u64, String>,
     pub(super) vertices_2d: &'a BTreeMap<u64, entities::Vertex2d>,
     pub(super) vertices_3d: &'a BTreeMap<u64, entities::Vertex3d>,
+    pub(super) faces: &'a BTreeMap<u64, entities::VertexFace>,
     /// How the drawing's code page text becomes characters.
     pub(super) page: CodePage,
 }
@@ -171,6 +172,68 @@ pub(super) fn named(
             None => Ref::Unresolved(hex(h)),
         },
     }
+}
+
+/// A polyface mesh's faces as wireframe edges, face by face in the order of the chain: each
+/// face's corners in order and back to the first. An index is 1-based, negative for an edge
+/// drawn invisible (the sign says nothing else and is dropped) and 0 for an unused corner; a
+/// face with fewer than two corners has no edge. An edge to a position the chain does not hold
+/// cannot be drawn: it is counted, not drawn.
+fn pface_wireframe(positions: &[Point3D], faces: &[[i16; 4]]) -> (Vec<[Point3D; 2]>, usize) {
+    let mut edges = Vec::new();
+    let mut skipped = 0;
+    for face in faces {
+        let corners: Vec<usize> = face
+            .iter()
+            .filter_map(|&i| usize::from(i.unsigned_abs()).checked_sub(1))
+            .collect();
+        if corners.len() < 2 {
+            continue;
+        }
+        for w in 0..corners.len() {
+            let (a, b) = (corners[w], corners[(w + 1) % corners.len()]);
+            match (positions.get(a), positions.get(b)) {
+                (Some(&pa), Some(&pb)) => edges.push([pa, pb]),
+                _ => skipped += 1,
+            }
+        }
+    }
+    (edges, skipped)
+}
+
+/// A polygon mesh's grid lines in the order the model states: `m` rows of `n` vertices,
+/// stored row by row (vertex `i * n + j` is row `i`, column `j`); first the edges
+/// `(i, j)-(i + 1, j)` row by row, then `(i, j)-(i, j + 1)` row by row, the closing edges
+/// included where the grid wraps. Unless exactly `m * n` vertices are held, no grid shape is
+/// guessed: every edge the definition implies is reported as skipped.
+fn mesh_wireframe(
+    positions: &[Point3D],
+    m: usize,
+    n: usize,
+    closed_m: bool,
+    closed_n: bool,
+) -> (Vec<[Point3D; 2]>, usize) {
+    let rows_joined = if closed_m { m } else { m.saturating_sub(1) };
+    let columns_joined = if closed_n { n } else { n.saturating_sub(1) };
+    let edge_count = rows_joined
+        .saturating_mul(n)
+        .saturating_add(m.saturating_mul(columns_joined));
+    if positions.is_empty() || positions.len() != m.saturating_mul(n) {
+        return (Vec::new(), edge_count);
+    }
+    let at = |i: usize, j: usize| positions[i * n + j];
+    let mut edges = Vec::with_capacity(edge_count);
+    for i in 0..rows_joined {
+        for j in 0..n {
+            edges.push([at(i, j), at((i + 1) % m, j)]);
+        }
+    }
+    for i in 0..m {
+        for j in 0..columns_joined {
+            edges.push([at(i, j), at(i, (j + 1) % n)]);
+        }
+    }
+    (edges, 0)
 }
 
 /// The handles of the objects an entity owns (its vertices): all of them from
@@ -430,6 +493,45 @@ pub(super) fn convert_entity(
                 .collect(),
             closed: p.closed_flags & 1 != 0,
         }),
+        Geometry::PolylinePface(p) => {
+            let chain = owned(ctx, &p.vertices, notes);
+            let positions: Vec<Point3D> = chain
+                .iter()
+                .filter_map(|h| ctx.vertices_3d.get(h))
+                .map(|v| point(v.point))
+                .collect();
+            let faces: Vec<[i16; 4]> = chain
+                .iter()
+                .filter_map(|h| ctx.faces.get(h))
+                .map(|f| f.indices)
+                .collect();
+            let (wireframe_edges, skipped_edges) = pface_wireframe(&positions, &faces);
+            Entity::PolylinePFace(Solid3DEntity {
+                common,
+                wireframe_edges,
+                skipped_edges,
+            })
+        }
+        Geometry::PolylineMesh(p) => {
+            let positions: Vec<Point3D> = owned(ctx, &p.vertices, notes)
+                .iter()
+                .filter_map(|h| ctx.vertices_3d.get(h))
+                .map(|v| point(v.point))
+                .collect();
+            let count = |n: i16| usize::try_from(n).unwrap_or(0);
+            let (wireframe_edges, skipped_edges) = mesh_wireframe(
+                &positions,
+                count(p.m_count),
+                count(p.n_count),
+                p.flags & 1 != 0,
+                p.flags & 32 != 0,
+            );
+            Entity::PolylineMesh(Solid3DEntity {
+                common,
+                wireframe_edges,
+                skipped_edges,
+            })
+        }
         Geometry::Tolerance(t) => {
             let Some(text_value) = characters(&t.text, ctx.page) else {
                 notes.add("text in a code page that is not read");

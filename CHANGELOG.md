@@ -6,6 +6,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Added
 
+- `PolylinePface`, `PolylineMesh`, `VertexFace` and the mesh vertex types: the polyface mesh and the polygon mesh with the vertices and faces they own. `read_database` converts them to the wireframe the model carries for a mesh -- a polyface mesh's faces edge by edge, a polygon mesh's grid lines row by row, then column by column -- and a mesh whose vertex count is not `m * n` is reported as not read, not guessed.
 - `DimensionKind::ArcLength` and the arc-length dimension (`ARC_DIMENSION`, R2004 and later): the dimension line arc point, the extension line origins, the arc centre, the start and end angles, whether only part of the arc is dimensioned, and the leader. `read_database` converts it; the arc point is the first leader point when the dimension has a leader and is left out when it has none.
 - `MultiLeader` and `Geometry::MultiLeader`: the multileader entity of R2010 and later -- its leader roots, each with the lines that
   reach it (points, breaks, line type, colour, weight, arrowhead), the text or block it points out, and the settings the entity

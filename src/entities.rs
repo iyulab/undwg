@@ -49,6 +49,16 @@ pub const TYPE_TOLERANCE: u16 = 46;
 pub const TYPE_VERTEX_2D: u16 = 10;
 /// The type code of a vertex of a 3D polyline.
 pub const TYPE_VERTEX_3D: u16 = 11;
+/// The type code of a vertex of a polygon mesh.
+pub const TYPE_VERTEX_MESH: u16 = 12;
+/// The type code of a position vertex of a polyface mesh.
+pub const TYPE_VERTEX_PFACE: u16 = 13;
+/// The type code of a face of a polyface mesh.
+pub const TYPE_VERTEX_PFACE_FACE: u16 = 14;
+/// The type code of a polyface mesh.
+pub const TYPE_POLYLINE_PFACE: u16 = 29;
+/// The type code of a polygon mesh.
+pub const TYPE_POLYLINE_MESH: u16 = 30;
 /// The type code of a 2D polyline.
 pub const TYPE_POLYLINE_2D: u16 = 15;
 /// The type code of a 3D polyline.
@@ -456,6 +466,48 @@ pub struct Polyline3d {
     pub sequence_end: Option<u64>,
 }
 
+/// A polyface mesh: the vertices it owns are its positions and its faces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolylinePface {
+    /// The number of position vertices the mesh states.
+    pub vertex_count: i16,
+    /// The number of faces the mesh states.
+    pub face_count: i16,
+    /// The vertices the mesh owns (R2000 names the first and the last only).
+    pub vertices: Vec<u64>,
+    /// The sequence end that closes the vertices.
+    pub sequence_end: Option<u64>,
+}
+
+/// A polygon mesh: a grid of vertices.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolylineMesh {
+    /// The flags: closed in M `1`, closed in N `32`.
+    pub flags: i16,
+    /// The curve and smooth surface type.
+    pub curve_type: i16,
+    /// The number of vertices in the M direction.
+    pub m_count: i16,
+    /// The number of vertices in the N direction.
+    pub n_count: i16,
+    /// The smooth surface density in M.
+    pub m_density: i16,
+    /// The smooth surface density in N.
+    pub n_density: i16,
+    /// The vertices the mesh owns (R2000 names the first and the last only).
+    pub vertices: Vec<u64>,
+    /// The sequence end that closes the vertices.
+    pub sequence_end: Option<u64>,
+}
+
+/// A face of a polyface mesh: up to four 1-based vertex indices, negative for
+/// an invisible edge and zero for an unused corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexFace {
+    /// The indices.
+    pub indices: [i16; 4],
+}
+
 /// A vertex of a 2D polyline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Vertex2d {
@@ -843,6 +895,12 @@ pub enum Geometry {
     Mline(Mline),
     /// A multileader (R2010 and later).
     MultiLeader(Box<MultiLeader>),
+    /// A polyface mesh.
+    PolylinePface(PolylinePface),
+    /// A polygon mesh.
+    PolylineMesh(PolylineMesh),
+    /// A face of a polyface mesh.
+    VertexFace(VertexFace),
 }
 
 /// An entity: its common data and its geometry.
@@ -2125,6 +2183,11 @@ pub fn read_entity_with_classes(
             | TYPE_POLYLINE_3D
             | TYPE_VERTEX_2D
             | TYPE_VERTEX_3D
+            | TYPE_VERTEX_MESH
+            | TYPE_VERTEX_PFACE
+            | TYPE_VERTEX_PFACE_FACE
+            | TYPE_POLYLINE_PFACE
+            | TYPE_POLYLINE_MESH
             | TYPE_DIMENSION_ORDINATE
             ..=TYPE_DIMENSION_DIAMETER
                 | TYPE_ATTRIB
@@ -2230,7 +2293,53 @@ pub fn read_entity_with_classes(
             Geometry::Polyline3d(polyline)
         }
         TYPE_VERTEX_2D => Geometry::Vertex2d(read_vertex_2d(&mut r, version)?),
-        TYPE_VERTEX_3D => Geometry::Vertex3d(Vertex3d {
+        TYPE_POLYLINE_PFACE => {
+            let vertex_count = r.bit_short()?;
+            let face_count = r.bit_short()?;
+            owned = if version >= Version::R2004 {
+                bounded_count(&mut r, "vertex count")?
+            } else {
+                0
+            };
+            Geometry::PolylinePface(PolylinePface {
+                vertex_count,
+                face_count,
+                vertices: Vec::new(),
+                sequence_end: None,
+            })
+        }
+        TYPE_POLYLINE_MESH => {
+            let flags = r.bit_short()?;
+            let curve_type = r.bit_short()?;
+            let m_count = r.bit_short()?;
+            let n_count = r.bit_short()?;
+            let m_density = r.bit_short()?;
+            let n_density = r.bit_short()?;
+            owned = if version >= Version::R2004 {
+                bounded_count(&mut r, "vertex count")?
+            } else {
+                0
+            };
+            Geometry::PolylineMesh(PolylineMesh {
+                flags,
+                curve_type,
+                m_count,
+                n_count,
+                m_density,
+                n_density,
+                vertices: Vec::new(),
+                sequence_end: None,
+            })
+        }
+        TYPE_VERTEX_PFACE_FACE => Geometry::VertexFace(VertexFace {
+            indices: [
+                r.bit_short()?,
+                r.bit_short()?,
+                r.bit_short()?,
+                r.bit_short()?,
+            ],
+        }),
+        TYPE_VERTEX_3D | TYPE_VERTEX_MESH | TYPE_VERTEX_PFACE => Geometry::Vertex3d(Vertex3d {
             flags: r.raw_char()?,
             point: r.point_3bd()?,
         }),
@@ -2306,6 +2415,8 @@ pub fn read_entity_with_classes(
     let (vertices, sequence_end) = match &mut geometry {
         Geometry::Polyline2d(p) => (Some(&mut p.vertices), Some(&mut p.sequence_end)),
         Geometry::Polyline3d(p) => (Some(&mut p.vertices), Some(&mut p.sequence_end)),
+        Geometry::PolylinePface(p) => (Some(&mut p.vertices), Some(&mut p.sequence_end)),
+        Geometry::PolylineMesh(p) => (Some(&mut p.vertices), Some(&mut p.sequence_end)),
         _ => (None, None),
     };
     if let (Some(vertices), Some(sequence_end)) = (vertices, sequence_end) {
