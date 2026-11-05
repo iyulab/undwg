@@ -9,15 +9,19 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `FileHeader::R2007`, `HeaderR2007`, `read_header_r2007`, `read_directory_r2007`, `read_section_r2007` and the types of the directory (`Directory2007`, `Section2007`, `SectionPage2007`, `PageMapEntry2007`): the container of R2007 (`AC1021`) files. The file header is an error-corrected block; the page map and the section map are Reed-Solomon coded system pages; data pages use a second Reed-Solomon code and R2007's own variant of LZ77. The parity of every codeword is checked, not used to correct, and the 32-bit checksum of every data page is verified, so a damaged page is an error that says which part is wrong. `read_header` now reads an R2007 header, and every reader that takes a version reads R2007: the class definitions and the header variables (strings in a string stream as from R2010, without R2010's second count), the object frames (the R2004 frame plus a string stream) and the entities, including the lock-position bit of an attribute, which R2007 states. `Drawing::open` and `read_database` open R2007 files. Every R2007 file of the test corpus (19) assembles, each section to its stated size, and reads into a model that agrees with the other reader's, entity by entity. The 64-bit checks of the file header and the section map are not read: the parity and the page checksum already decide whether the bytes are intact.
 - `HeaderError::Compression`: the compressed file header record of an R2007 file could not be decompressed.
 - `read_database_with_facts` and `DrawingFacts`: the entity model together with what the file states about itself -- its version, its code page, the header variables and the name of the current layer -- from one read. `read_database` is this without the facts.
+- `Drawing::measurement` and `DrawingFacts::measurement`: `MEASUREMENT`, which a file keeps in its template (the fifth section locator of an R2000 file, `AcDb:Template` from R2004). The description before it counts bytes up to R2004 and two-byte characters from R2007. `DrawingError::Template` for a template that is not what the format documents.
+- `OLEFRAME` and `OLE2FRAME` are named as the kinds of entity this reader does not read (they are kept as unknown entities, as the others are).
 - `CodePage::name_of`: the name the DXF files of the same drawings give a code page number (`ANSI_1250`, `ANSI_1251`, `ANSI_1252`), for the numbers the reader knows.
+
+### Changed
+
+- `read_database` lists an insertion's attributes at the top level as well, right after the insertion, as the model's contract says.
+- Arc-length dimensions are read in R2000 files too: the class can occur there.
+- The header-variable reader accepts up to one whole padding byte after the last handle's byte boundary (R2007 files leave one).
 
 ### Removed
 
 - `HeaderError::NotYetRead`, `ClassError::NotRead`, `VariablesError::NotRead` and `ObjectError::NotRead`: every version the reader names is read now.
-
-### Changed
-
-- The header-variable reader accepts up to one whole padding byte after the last handle's byte boundary (R2007 files leave one).
 
 ## [0.1.0] - 2026-11-05
 

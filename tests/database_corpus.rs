@@ -100,14 +100,23 @@ fn every_real_file_reads_into_a_consistent_drawing() {
                 other => panic!("{}: layer {other:?}", path.display()),
             }
         }
-        // The top level is what model space and the paper spaces own.
+        // The top level is what model space and the paper spaces own, and the
+        // attributes of their insertions, listed again right after each.
         let spaces: Vec<_> = db
             .tables
             .block_records
             .iter()
             .filter(|(n, _)| n.starts_with("*Model_Space") || n.starts_with("*Paper_Space"))
             .flat_map(|(_, b)| b.entities.iter())
-            .map(|e| e.common().id)
+            .flat_map(|e| {
+                let attribs = match e {
+                    uncad_model::Entity::Insert(i) => {
+                        i.attribs.iter().map(|a| a.common.id).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                std::iter::once(e.common().id).chain(attribs)
+            })
             .collect();
         let top: Vec<_> = db.entities.iter().map(|e| e.common().id).collect();
         assert_eq!(

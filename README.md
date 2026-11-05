@@ -39,7 +39,7 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | Raster images and image definitions (R2000, R2004 and later) | done |
 | Leaders (R2000, R2004 and later) | done |
 | Multileaders: leader roots and lines, text or block content, the entity's own settings and its style's line type (R2010 and later) | done |
-| Arc-length dimensions (R2004 and later) | done |
+| Arc-length dimensions (R2000 and later; an object of a class) | done |
 | Polyface meshes and polygon meshes, as the wireframe the model carries (R2000, R2004 and later) | done |
 | Multilines and multiline style names (R2000, R2004 and later) | done |
 | Dimension styles (R2000, R2004 and later) | done |

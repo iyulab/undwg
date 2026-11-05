@@ -137,6 +137,9 @@ pub struct DrawingFacts {
     pub code_page: u16,
     /// The header variables.
     pub variables: HeaderVariables,
+    /// `MEASUREMENT` (0 English, 1 metric), kept in the file's template; `None`
+    /// when the file has none.
+    pub measurement: Option<u16>,
     /// The name of the layer the header calls current; `None` when the header
     /// names no layer the layer table has, or the name is a text this reader
     /// cannot turn into characters.
@@ -579,7 +582,13 @@ pub fn read_database_with_facts(
             || Some(name) == paper_space
             || name.starts_with("*Paper_Space")
         {
-            top_level.extend(by_block.get(name).into_iter().flatten().cloned());
+            for entity in by_block.get(name).into_iter().flatten() {
+                top_level.push(entity.clone());
+                // An insertion's attributes are listed at the top as well, right after it.
+                if let Entity::Insert(insert) = entity {
+                    top_level.extend(insert.attribs.iter().cloned().map(Entity::Attrib));
+                }
+            }
         }
     }
 
@@ -764,6 +773,7 @@ pub fn read_database_with_facts(
         version,
         code_page: drawing.code_page(),
         variables: vars.clone(),
+        measurement: drawing.measurement(),
         current_layer,
     };
     let database = CadDatabase {

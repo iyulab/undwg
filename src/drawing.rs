@@ -34,6 +34,8 @@ pub enum DrawingError {
     Variables(VariablesError),
     /// The object map could not be read.
     ObjectMap(ObjectError),
+    /// The template (which holds `MEASUREMENT`) is not what the format documents.
+    Template,
 }
 
 impl fmt::Display for DrawingError {
@@ -45,6 +47,9 @@ impl fmt::Display for DrawingError {
             DrawingError::Classes(e) => e.fmt(f),
             DrawingError::Variables(e) => e.fmt(f),
             DrawingError::ObjectMap(e) => e.fmt(f),
+            DrawingError::Template => {
+                write!(f, "the template section is not what the format documents")
+            }
         }
     }
 }
@@ -93,6 +98,26 @@ pub struct Drawing<'a> {
     entries: Vec<ObjectEntry>,
     classes: Vec<ClassDef>,
     variables: HeaderVariables,
+    measurement: Option<u16>,
+}
+
+/// `MEASUREMENT` from the template: a description (a length, then that much
+/// text), then the variable as an unsigned short. The length counts bytes up to
+/// R2004 and characters of two bytes from R2007.
+fn read_measurement(template: &[u8], version: Version) -> Result<u16, DrawingError> {
+    let unit = if version >= Version::R2007 { 2 } else { 1 };
+    let length = template
+        .get(..2)
+        .map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])))
+        .ok_or(DrawingError::Template)?;
+    let at = length
+        .checked_mul(unit)
+        .and_then(|n| n.checked_add(2))
+        .ok_or(DrawingError::Template)?;
+    template
+        .get(at..at + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .ok_or(DrawingError::Template)
 }
 
 impl<'a> Drawing<'a> {
@@ -109,6 +134,10 @@ impl<'a> Drawing<'a> {
                 let variables = header
                     .section(bytes, 0)?
                     .ok_or(DrawingError::Missing("header variables"))?;
+                let measurement = header
+                    .section(bytes, 4)?
+                    .map(|t| read_measurement(t, Version::R2000))
+                    .transpose()?;
                 Ok(Drawing {
                     version: Version::R2000,
                     code_page: header.code_page,
@@ -116,6 +145,7 @@ impl<'a> Drawing<'a> {
                     entries: read_object_map(map)?,
                     classes: read_classes(classes, Version::R2000)?,
                     variables: read_header_variables(variables, Version::R2000)?,
+                    measurement,
                 })
             }
             FileHeader::R2007(header) => {
@@ -126,6 +156,9 @@ impl<'a> Drawing<'a> {
                 let map = get("AcDb:Handles")?;
                 let classes = get("AcDb:Classes")?;
                 let variables = get("AcDb:Header")?;
+                let measurement = read_section_r2007(bytes, &directory, "AcDb:Template")?
+                    .map(|t| read_measurement(&t, Version::R2007))
+                    .transpose()?;
                 Ok(Drawing {
                     version: Version::R2007,
                     code_page: header.code_page,
@@ -133,6 +166,7 @@ impl<'a> Drawing<'a> {
                     entries: read_object_map(&map)?,
                     classes: read_classes(&classes, Version::R2007)?,
                     variables: read_header_variables(&variables, Version::R2007)?,
+                    measurement,
                 })
             }
             FileHeader::R2004(version, header) => {
@@ -143,6 +177,9 @@ impl<'a> Drawing<'a> {
                 let map = get("AcDb:Handles")?;
                 let classes = get("AcDb:Classes")?;
                 let variables = get("AcDb:Header")?;
+                let measurement = read_section(bytes, &directory, "AcDb:Template")?
+                    .map(|t| read_measurement(&t, version))
+                    .transpose()?;
                 Ok(Drawing {
                     version,
                     code_page: header.code_page,
@@ -150,6 +187,7 @@ impl<'a> Drawing<'a> {
                     entries: read_object_map(&map)?,
                     classes: read_classes(&classes, version)?,
                     variables: read_header_variables(&variables, version)?,
+                    measurement,
                 })
             }
         }
@@ -187,5 +225,37 @@ impl<'a> Drawing<'a> {
     /// The header variables.
     pub fn variables(&self) -> &HeaderVariables {
         &self.variables
+    }
+
+    /// `MEASUREMENT` (0 English, 1 metric), which the file keeps in its template
+    /// rather than in the header variables; `None` when the file has no template.
+    pub fn measurement(&self) -> Option<u16> {
+        self.measurement
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn measurement_follows_the_description() {
+        let old = Version::R2004;
+        // No description, metric.
+        assert_eq!(read_measurement(&[0, 0, 1, 0], old), Ok(1));
+        // A two-byte description, English.
+        assert_eq!(read_measurement(&[2, 0, 0xAA, 0xBB, 0, 0], old), Ok(0));
+        // From R2007 the length counts characters of two bytes: one character, metric.
+        assert_eq!(read_measurement(&[1, 0, 0, 0, 1, 0], Version::R2013), Ok(1));
+        // A description longer than the section, or no room for the variable.
+        assert_eq!(
+            read_measurement(&[9, 0, 1, 0], old),
+            Err(DrawingError::Template)
+        );
+        assert_eq!(
+            read_measurement(&[0, 0, 1], old),
+            Err(DrawingError::Template)
+        );
+        assert_eq!(read_measurement(&[], old), Err(DrawingError::Template));
     }
 }

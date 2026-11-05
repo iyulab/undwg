@@ -2057,6 +2057,8 @@ fn unread_entity_name(type_code: u16, classes: &[ClassDef]) -> Option<String> {
         37 => "REGION",
         38 => "3DSOLID",
         39 => "BODY",
+        43 => "OLEFRAME",
+        74 => "OLE2FRAME",
         _ => "",
     };
     if !fixed.is_empty() {
@@ -2146,9 +2148,8 @@ pub fn read_entity_with_classes(
     {
         frame.type_code = TYPE_WIPEOUT;
     }
-    // An arc-length dimension is an object of a class, from R2004.
-    if version >= Version::R2004
-        && frame.type_code >= 500
+    // An arc-length dimension is an object of a class.
+    if frame.type_code >= 500
         && classes.iter().any(|c| {
             i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "ARC_DIMENSION"
         })
