@@ -27,7 +27,7 @@ use crate::objects::ObjectEntry;
 use crate::tables::{
     read_appid_name, read_block_control, read_block_header, read_dim_style, read_dimstyle_name,
     read_image_definition, read_layer, read_layout, read_linetype_name, read_mleader_style,
-    read_mline_style, read_mlinestyle_name, read_style_name, BlockHeader, Layer,
+    read_mline_style, read_mlinestyle_name, read_style_name, read_table_style, BlockHeader, Layer,
 };
 use crate::variables::HeaderVariables;
 use crate::version::Version;
@@ -185,6 +185,7 @@ pub fn read_database_with_facts(
     let mut image_defs: BTreeMap<u64, crate::tables::ImageDefinition> = BTreeMap::new();
     let mut mline_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
     let mut mleader_styles: BTreeMap<u64, i16> = BTreeMap::new();
+    let mut table_styles: BTreeMap<u64, i16> = BTreeMap::new();
     let mut headers: Vec<BlockHeader> = Vec::new();
     let mut table_order: Vec<Option<u64>> = Vec::new();
     for e in &entries {
@@ -286,6 +287,17 @@ pub fn read_database_with_facts(
             Ok(None) => {}
             Err(_) => {
                 notes.add("multileader style that could not be read");
+                continue;
+            }
+        }
+        match read_table_style(objects, *e, version, drawing.classes()) {
+            Ok(Some(style)) => {
+                table_styles.insert(e.handle, style.flow);
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                notes.add("table style that could not be read");
                 continue;
             }
         }
@@ -454,6 +466,7 @@ pub fn read_database_with_facts(
         dim_styles: &dim_styles,
         mline_styles: &mline_styles,
         mleader_styles: &mleader_styles,
+        table_styles: &table_styles,
         acad,
         block_names: &block_names,
         vertices_2d: &vertices_2d,

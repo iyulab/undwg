@@ -31,6 +31,7 @@ mod multileader;
 mod objects;
 mod r2007;
 mod sections;
+mod table;
 mod tables;
 mod variables;
 mod version;
@@ -74,13 +75,14 @@ pub use sections::{
     read_data_page, read_directory, read_section, DataPageHeader, PageMapEntry, SectionDescription,
     SectionDirectory, SectionError, SectionPage,
 };
+pub use table::{Table, TableCell};
 pub use tables::{
     read_appid_name, read_block_control, read_block_header, read_block_name, read_dim_style,
     read_dimstyle_name, read_image_definition, read_layer, read_layout, read_linetype_name,
-    read_mleader_style, read_mline_style, read_mlinestyle_name, read_style_name, BlockHeader,
-    DimStyle, ImageDefinition, Layer, MleaderStyle, MlineElement, MlineStyle, PlotLayout,
-    TableColor, TYPE_APPID, TYPE_BLOCK_CONTROL, TYPE_BLOCK_HEADER, TYPE_DIMSTYLE, TYPE_LAYER,
-    TYPE_LINETYPE, TYPE_MLINESTYLE, TYPE_STYLE,
+    read_mleader_style, read_mline_style, read_mlinestyle_name, read_style_name, read_table_style,
+    BlockHeader, DimStyle, ImageDefinition, Layer, MleaderStyle, MlineElement, MlineStyle,
+    PlotLayout, TableColor, TableStyle, TYPE_APPID, TYPE_BLOCK_CONTROL, TYPE_BLOCK_HEADER,
+    TYPE_DIMSTYLE, TYPE_LAYER, TYPE_LINETYPE, TYPE_MLINESTYLE, TYPE_STYLE,
 };
 pub use variables::{
     read_header_variables, ControlHandles, DimensionVariables, ExtendedVariables, HeaderColor,

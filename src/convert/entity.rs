@@ -3,15 +3,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use uncad_model::model::{
-    ArcEntity, AttdefEntity, AttribEntity, AttributeFlags, CircleEntity, Confidence,
-    DimensionEntity, DimensionKind as ModelDimensionKind, DimensionPoints, EllipseEntity,
-    EntityCommon, EntityId, EntityLinetype, Face3DEntity, HatchBoundaryPath,
+    AcadTableEntity, ArcEntity, AttdefEntity, AttribEntity, AttributeFlags, CircleEntity,
+    Confidence, DimensionEntity, DimensionKind as ModelDimensionKind, DimensionPoints,
+    EllipseEntity, EntityCommon, EntityId, EntityLinetype, Face3DEntity, HatchBoundaryPath,
     HatchEdge as ModelHatchEdge, HatchEntity, HatchGradient as ModelHatchGradient,
     HatchPatternLine, HatchStyle, HorizontalJustification, ImageEntity, InsertEntity,
     LeaderAnnotation, LeaderEntity, LeaderPath, LineEntity, LwPolylineEntity, MLineEntity,
     MLineVertex, MTextAttachment, MTextEntity, OrdinateAxis, Origin, Point2D, Point3D, PointEntity,
     PolylineEntity, PolylineVertex, RayEntity, Ref, Solid3DEntity, SolidEntity, SplineEntity,
-    TextEntity, TextOverride, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
+    TableCell as ModelTableCell, TableCellKind, TableFlow, TableGrid, TableRow, TextEntity,
+    TextOverride, ToleranceEntity, VerticalJustification, ViewportEntity, ViewportView,
     WipeoutEntity,
 };
 use uncad_model::Entity;
@@ -76,6 +77,8 @@ pub(super) struct Context<'a> {
     pub(super) mline_styles: &'a BTreeMap<u64, TextValue>,
     /// The leader type each multileader style states.
     pub(super) mleader_styles: &'a BTreeMap<u64, i16>,
+    /// The flow direction each table style states.
+    pub(super) table_styles: &'a BTreeMap<u64, i16>,
     /// The handle of the application named ACAD, which keeps dimension overrides.
     pub(super) acad: Option<u64>,
     pub(super) block_names: &'a BTreeMap<u64, String>,
@@ -417,6 +420,21 @@ pub(super) fn convert_entity(
                 extrusion: point(i.extrusion),
             })
         }
+        Geometry::Table(t) => Entity::AcadTable(AcadTableEntity {
+            common,
+            block_name: match ctx.block_names.get(&t.insert.block) {
+                Some(n) => Ref::Resolved(n.clone()),
+                None => Ref::Unresolved(hex(t.insert.block)),
+            },
+            insertion_point: point(t.insert.position),
+            scale: point(t.insert.scale),
+            rotation: t.insert.rotation,
+            grid: table_grid(t, ctx.page, notes),
+            flow: t
+                .flow
+                .or_else(|| t.style.and_then(|s| ctx.table_styles.get(&s).copied()))
+                .and_then(|code| TableFlow::from_code(i64::from(code))),
+        }),
         Geometry::Mtext(m) => {
             let Some(text) = characters(&m.value, ctx.page) else {
                 notes.add("text in a code page that is not read");
@@ -1010,4 +1028,66 @@ pub(super) fn convert_common(entity: &entities::Entity, ctx: &Context<'_>) -> En
         lineweight: lineweight(c.lineweight),
         transparency: (version >= Version::R2004).then(|| c.transparency.unwrap_or(0)),
     }
+}
+
+/// A table's grid as the model states it, or `None` when what the file states
+/// is not a whole grid or a cell's text cannot be told (the table then says
+/// nothing of its cells, as the model asks).
+fn table_grid(t: &crate::table::Table, page: CodePage, notes: &mut Notes) -> Option<TableGrid> {
+    let columns = t.column_widths.len();
+    let mut rows = Vec::with_capacity(t.row_heights.len());
+    for (row, height) in t.row_heights.iter().enumerate() {
+        let mut cells = Vec::with_capacity(columns);
+        for cell in &t.cells[row * columns..(row + 1) * columns] {
+            let (Ok(span_columns), Ok(span_rows)) = (
+                u32::try_from(cell.span_columns),
+                u32::try_from(cell.span_rows),
+            ) else {
+                notes.add("table cell whose span is not a count");
+                return None;
+            };
+            // A text cell's text is the cell's own (before R2007) or its
+            // value's string; a value of another kind is not read.
+            let text = match (cell.kind, &cell.text, cell.value_kind, &cell.value_text) {
+                (2, ..) => None,
+                (_, Some(text), None, _) => Some(text),
+                (_, None, Some(0), _) => None,
+                (_, None, Some(4), Some(text)) => Some(text),
+                _ => {
+                    notes.add("table cell whose value is not a text");
+                    return None;
+                }
+            };
+            let text = match text {
+                None => None,
+                Some(t) => match characters(t, page) {
+                    Some(s) if s.is_empty() => None,
+                    Some(s) => Some(s),
+                    None => {
+                        notes.add("table cell text in a code page that is not read");
+                        return None;
+                    }
+                },
+            };
+            cells.push(ModelTableCell {
+                kind: match cell.kind {
+                    1 => Some(TableCellKind::Text),
+                    2 => Some(TableCellKind::Block),
+                    _ => None,
+                },
+                text,
+                covered: cell.merged,
+                span_columns,
+                span_rows,
+            });
+        }
+        rows.push(TableRow {
+            height: *height,
+            cells,
+        });
+    }
+    Some(TableGrid {
+        column_widths: t.column_widths.clone(),
+        rows,
+    })
 }

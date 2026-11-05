@@ -329,7 +329,7 @@ fn text_value(
 }
 
 /// Reads a colour as a table entry states it.
-fn read_table_color(
+pub(crate) fn read_table_color(
     r: &mut BitReader<'_>,
     strings: &mut Option<BitReader<'_>>,
     version: Version,
@@ -375,6 +375,25 @@ pub struct TableColor {
     /// to the packed colour; it is the number a reader without true colour
     /// would show). For R2000 it is the colour number itself.
     pub index: u16,
+}
+
+/// A colour as R2004 and later write it, in the one form it has in a table
+/// style and a table: a colour number, the packed value and the names the flag
+/// byte says follow. Measured on real files, R2000 writes this form there too.
+pub(crate) fn read_full_color(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+) -> Result<(), BitError> {
+    r.bit_short()?;
+    r.bit_long()?;
+    let names = r.raw_char()?;
+    if names & 1 != 0 {
+        text_value(r, strings)?;
+    }
+    if names & 2 != 0 {
+        text_value(r, strings)?;
+    }
+    Ok(())
 }
 
 /// A layer: a table entry that entities refer to by handle.
@@ -707,6 +726,98 @@ fn read_mleader_style_fields(
         r.bit()?; // the leader is extended to the text
     }
     Ok(leader_type)
+}
+
+/// A table style, as far as a table needs it: which way its rows run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableStyle {
+    /// The style's handle.
+    pub handle: u64,
+    /// The flow direction: `0` down, `1` up.
+    pub flow: i16,
+}
+
+/// Reads the table style at `entry` as R2000 to R2007 write it; `Ok(None)` when
+/// the object is of another kind or of a version whose layout this reader does
+/// not read. The fields are those of the public file specification and must fill
+/// the object's main data exactly.
+pub fn read_table_style(
+    objects: &[u8],
+    entry: ObjectEntry,
+    version: Version,
+    classes: &[ClassDef],
+) -> Result<Option<TableStyle>, ObjectError> {
+    if version >= Version::R2010 {
+        return Ok(None);
+    }
+    let is_style = |code: u16| {
+        code >= 500
+            && classes
+                .iter()
+                .any(|c| i32::from(c.number) == i32::from(code) && c.dxf_name == "TABLESTYLE")
+    };
+    let Some(Prefix { r, layout, .. }) = open_prefix(objects, entry, version, is_style)? else {
+        return Ok(None);
+    };
+    let mut r = r;
+    let mut strings = layout.strings.map(|(from, _)| {
+        let mut s = r.clone();
+        s.seek(from);
+        s
+    });
+    let flow = read_table_style_fields(&mut r, &mut strings, version)?;
+    if r.position() != layout.main_end {
+        return Err(ObjectError::Unexpected {
+            what: "table style main data length",
+        });
+    }
+    Ok(Some(TableStyle {
+        handle: entry.handle,
+        flow,
+    }))
+}
+
+fn read_table_style_fields(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+) -> Result<i16, BitError> {
+    text_value(r, strings)?; // the description
+    let flow = r.bit_short()?;
+    r.bit_short()?; // flags
+    r.bit_double()?; // the horizontal cell margin
+    r.bit_double()?; // the vertical cell margin
+    r.bit()?; // the title is suppressed
+    r.bit()?; // the header is suppressed
+    {
+        let mut c = r.clone();
+        let mut bits = String::new();
+        for i in 0..200 {
+            if i % 8 == 0 {
+                bits.push(' ');
+            }
+            bits.push(if c.bit().unwrap_or(false) { '1' } else { '0' });
+        }
+    }
+    // The data, title and header row styles, in this order.
+    for _ in 0..3 {
+        r.bit_double()?; // the text height
+        r.bit_short()?; // the text alignment
+        read_full_color(r, strings)?; // the text colour
+        read_full_color(r, strings)?; // the fill colour
+        r.bit()?; // the background colour is enabled
+        for _ in 0..6 {
+            r.bit_short()?; // the border line weight
+            r.bit()?; // the border is visible
+            read_full_color(r, strings)?; // the border colour
+        }
+        if version >= Version::R2007 {
+            r.bit_long()?; // the data type
+            r.bit_long()?; // the data unit type
+            text_value(r, strings)?; // the format string
+        }
+    }
+    Ok(flow)
 }
 
 /// A multiline style: the lines a multiline is drawn with.

@@ -818,7 +818,7 @@ pub struct References {
 
 /// What the main stream says about the handles that follow.
 #[derive(Debug, Clone, Copy)]
-struct HandleFlags {
+pub(crate) struct HandleFlags {
     xdictionary_stored: bool,
     links_stored: bool,
     material_stored: bool,
@@ -895,6 +895,8 @@ pub enum Geometry {
     Mline(Mline),
     /// A multileader (R2010 and later).
     MultiLeader(Box<MultiLeader>),
+    /// A table (R2000 to R2007).
+    Table(Box<crate::table::Table>),
     /// A polyface mesh.
     PolylinePface(PolylinePface),
     /// A polygon mesh.
@@ -916,7 +918,7 @@ pub struct Entity {
 
 /// Reads the common entity data. The reader is positioned just after the
 /// object type.
-fn read_common(
+pub(crate) fn read_common(
     r: &mut BitReader<'_>,
     version: Version,
 ) -> Result<(CommonEntity, HandleFlags), BitError> {
@@ -1018,7 +1020,7 @@ fn read_common(
 /// Reads the handle stream that every entity has: the references of the
 /// common data, in the order the format gives them. The reader is positioned
 /// at the start of the handle stream.
-fn read_references(
+pub(crate) fn read_references(
     h: &mut BitReader<'_>,
     common: &CommonEntity,
     flags: HandleFlags,
@@ -1973,7 +1975,10 @@ fn read_text(r: &mut BitReader<'_>, strings: &mut Option<BitReader<'_>>) -> Resu
 
 /// Reads the main-stream fields of a block insertion; the second value is the
 /// count of attributes it owns (R2004 and later), which the handle stream lists.
-fn read_insert(r: &mut BitReader<'_>, version: Version) -> Result<(Insert, usize), BitError> {
+pub(crate) fn read_insert(
+    r: &mut BitReader<'_>,
+    version: Version,
+) -> Result<(Insert, usize), BitError> {
     let position = r.point_3bd()?;
     // How the scale is stored: all ones, a value with the other two defaulted
     // to one, one value for all three, or one value and two defaulting to it.
@@ -2163,6 +2168,19 @@ pub fn read_entity_with_classes(
         })
     {
         frame.type_code = TYPE_MULTILEADER;
+    }
+    // A table is an object of a class; the versions whose layout this reader
+    // knows read it whole, and a table that does not read stays an entity of a
+    // kind this reader does not read.
+    if version < Version::R2010
+        && frame.type_code >= 500
+        && classes.iter().any(|c| {
+            i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "ACAD_TABLE"
+        })
+    {
+        if let Ok(table) = crate::table::read_table_entity(objects, entry, version) {
+            return Ok(Some(table));
+        }
     }
     if !matches!(
         frame.type_code,

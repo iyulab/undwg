@@ -44,8 +44,8 @@ Pre-release. The reader is built layer by layer, and each layer is checked again
 | Multilines and multiline style names (R2000, R2004 and later) | done |
 | Dimension styles (R2000, R2004 and later) | done |
 | Header variables: units, extents, current layer and styles, dimension defaults, table and dictionary handles (R2000, R2004 and later) | done |
-| Whole drawing into the `uncad-model` entity model (`read_database`): header, layers, blocks and their drawing order, every table the model carries (dimension styles, multiline styles, layouts, image definitions) and 29 kinds of entity -- lines, circles, arcs, points, polylines, meshes, solids, rays, ellipses, faces, texts, attributes, insertions, multiline texts, splines, dimensions, leaders, multileaders, hatches, images, wipeouts, multilines, viewports, tolerances | done |
-| Entities of other kinds (3D solids and regions, tables, lights, surfaces) | kept as unknown entities with their common data and the name of the kind; their shape is planned |
+| Whole drawing into the `uncad-model` entity model (`read_database`): header, layers, blocks and their drawing order, every table the model carries (dimension styles, multiline styles, layouts, image definitions) and 30 kinds of entity -- lines, circles, arcs, points, polylines, meshes, solids, rays, ellipses, faces, texts, attributes, insertions, multiline texts, splines, dimensions, leaders, multileaders, hatches, images, wipeouts, multilines, viewports, tolerances, tables (R2000 to R2007) | done |
+| Entities of other kinds (3D solids and regions, tables of R2010 and later, lights, surfaces) | kept as unknown entities with their common data and the name of the kind; their shape is planned |
 
 Files older than R2000 are an explicit error that names the version bytes it found. Writing DWG is out of scope.
 
