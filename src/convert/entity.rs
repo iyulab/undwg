@@ -514,6 +514,7 @@ pub(super) fn convert_entity(
                     entities::DimensionKind::Radius => ModelDimensionKind::Radius,
                     entities::DimensionKind::Angular3Point => ModelDimensionKind::Angular3Point,
                     entities::DimensionKind::Ordinate => ModelDimensionKind::Ordinate,
+                    entities::DimensionKind::ArcLength => ModelDimensionKind::ArcLength,
                 }),
                 // A measurement is a length or an angle, never negative: a writer that
                 // did not measure the dimension stores -1.
@@ -525,7 +526,11 @@ pub(super) fn convert_entity(
                     extension1: d.point13.map(point),
                     extension2: d.point14.map(point),
                     radial: d.point15.map(point),
-                    arc: d.point16.map(at_elevation),
+                    arc: match &d.arc {
+                        Some(a) if a.has_leader => Some(point(a.leader_point1)),
+                        Some(_) => None,
+                        None => d.point16.map(at_elevation),
+                    },
                 },
                 rotation: d.rotation.unwrap_or(0.0),
                 text_rotation: d.text_rotation,

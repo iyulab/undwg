@@ -35,6 +35,7 @@ const TYPE_HATCH: u16 = 0x7001;
 const TYPE_IMAGE: u16 = 0x7002;
 const TYPE_WIPEOUT: u16 = 0x7003;
 const TYPE_MULTILEADER: u16 = 0x7004;
+const TYPE_ARC_DIMENSION: u16 = 0x7005;
 
 /// The type code of a trace.
 pub const TYPE_TRACE: u16 = 32;
@@ -541,6 +542,8 @@ pub enum DimensionKind {
     Radius,
     /// A diameter.
     Diameter,
+    /// The length along an arc (R2004 and later; a class of the drawing).
+    ArcLength,
 }
 
 /// A dimension: the data every kind has and the points of its own kind. The
@@ -597,10 +600,31 @@ pub struct Dimension {
     pub leader_length: Option<f64>,
     /// Which axis an ordinate dimension measures: bit 0 set for x.
     pub ordinate_flags: Option<u8>,
+    /// What an arc-length dimension states beyond the points above.
+    pub arc: Option<ArcLengthFields>,
     /// The handle of the dimension style.
     pub style: Option<u64>,
     /// The handle of the anonymous block that draws the dimension, when it has one.
     pub block: Option<u64>,
+}
+
+/// The fields an arc-length dimension has of its own. Its dimension line arc point is the
+/// dimension's definition point, its extension line origins the 13- and 14-point and the centre
+/// of the arc the 15-point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArcLengthFields {
+    /// Whether only part of the arc is dimensioned.
+    pub partial: bool,
+    /// The start angle of the dimensioned part, in radians.
+    pub start_angle: f64,
+    /// The end angle, in radians.
+    pub end_angle: f64,
+    /// Whether the dimension has a leader.
+    pub has_leader: bool,
+    /// The first point of the leader.
+    pub leader_point1: [f64; 3],
+    /// The second point of the leader.
+    pub leader_point2: [f64; 3],
 }
 
 /// A multiline text. Its value keeps the formatting codes the file stores.
@@ -1621,6 +1645,7 @@ fn read_dimension(
         rotation: None,
         leader_length: None,
         ordinate_flags: None,
+        arc: None,
         style: None,
         block: None,
     };
@@ -1666,6 +1691,24 @@ fn read_dimension(
             d.point15 = Some(r.point_3bd()?);
             d.definition_point = r.point_3bd()?;
             d.leader_length = Some(r.bit_double()?);
+        }
+        DimensionKind::ArcLength => {
+            d.definition_point = r.point_3bd()?;
+            d.point13 = Some(r.point_3bd()?);
+            d.point14 = Some(r.point_3bd()?);
+            d.point15 = Some(r.point_3bd()?);
+            let partial = r.bit()?;
+            let start_angle = r.bit_double()?;
+            let end_angle = r.bit_double()?;
+            let has_leader = r.bit()?;
+            d.arc = Some(ArcLengthFields {
+                partial,
+                start_angle,
+                end_angle,
+                has_leader,
+                leader_point1: r.point_3bd()?,
+                leader_point2: r.point_3bd()?,
+            });
         }
     }
     Ok(d)
@@ -2043,6 +2086,15 @@ pub fn read_entity_with_classes(
     {
         frame.type_code = TYPE_WIPEOUT;
     }
+    // An arc-length dimension is an object of a class, from R2004.
+    if version >= Version::R2004
+        && frame.type_code >= 500
+        && classes.iter().any(|c| {
+            i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "ARC_DIMENSION"
+        })
+    {
+        frame.type_code = TYPE_ARC_DIMENSION;
+    }
     // A multileader is an object of a class too; this reader reads the layout
     // of R2010 and later.
     if version >= Version::R2010
@@ -2086,6 +2138,7 @@ pub fn read_entity_with_classes(
                 | TYPE_LEADER
                 | TYPE_MLINE
                 | TYPE_MULTILEADER
+                | TYPE_ARC_DIMENSION
     ) {
         // An entity of a kind this reader does not read is still an entity:
         // its common data and references are read, and the kind is named.
@@ -2195,6 +2248,12 @@ pub fn read_entity_with_classes(
         TYPE_WIPEOUT => Geometry::Wipeout(read_image(&mut r, version)?),
         TYPE_LEADER => Geometry::Leader(read_leader(&mut r, version)?),
         TYPE_MLINE => Geometry::Mline(read_mline(&mut r)?),
+        TYPE_ARC_DIMENSION => Geometry::Dimension(read_dimension(
+            &mut r,
+            &mut strings,
+            version,
+            DimensionKind::ArcLength,
+        )?),
         TYPE_MULTILEADER => {
             let (multileader, slots) = read_multileader(&mut r, &mut strings, version)?;
             multileader_slots = slots;

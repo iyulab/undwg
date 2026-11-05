@@ -499,6 +499,7 @@ fn every_real_line_circle_and_arc_reads() {
             if !is_hatch(frame.type_code)
                 && !is_class(frame.type_code, "IMAGE")
                 && !is_class(frame.type_code, "MULTILEADER")
+                && !is_class(frame.type_code, "ARC_DIMENSION")
                 && !matches!(frame.type_code, 1..=3 | 7 | 10 | 11 | 15 | 16 | 17..=19 | 20..=26 | 27 | 28 | 31 | 32 | 35 | 36 | 34 | 40 | 41 | 44 | 45 | 46 | 47 | 77)
             {
                 continue;
