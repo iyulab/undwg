@@ -2156,10 +2156,8 @@ pub fn read_entity_with_classes(
     {
         frame.type_code = TYPE_ARC_DIMENSION;
     }
-    // A multileader is an object of a class too; this reader reads the layout
-    // of R2010 and later.
-    if version >= Version::R2010
-        && frame.type_code >= 500
+    // A multileader is an object of a class too.
+    if frame.type_code >= 500
         && classes.iter().any(|c| {
             i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "MULTILEADER"
         })

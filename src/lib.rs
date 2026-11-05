@@ -60,8 +60,8 @@ pub use header::{
 };
 pub use lz::LzError;
 pub use multileader::{
-    MultiLeader, MultiLeaderArrowHead, MultiLeaderBlock, MultiLeaderBreak, MultiLeaderColor,
-    MultiLeaderContent, MultiLeaderLine, MultiLeaderRoot, MultiLeaderText,
+    MultiLeader, MultiLeaderArrowHead, MultiLeaderBlock, MultiLeaderBlockLabel, MultiLeaderBreak,
+    MultiLeaderColor, MultiLeaderContent, MultiLeaderLine, MultiLeaderRoot, MultiLeaderText,
 };
 pub use objects::{
     read_object_frame, read_object_map, ExtendedData, ObjectEntry, ObjectError, ObjectFrame,

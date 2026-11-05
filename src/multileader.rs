@@ -30,6 +30,19 @@ pub struct MultiLeaderArrowHead {
     pub handle: Option<u64>,
 }
 
+/// A block attribute label of the entity (R2007 and earlier).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiLeaderBlockLabel {
+    /// The attribute definition the label belongs to.
+    pub attribute_definition: Option<u64>,
+    /// The label text.
+    pub text: String,
+    /// The sequential index of the label in the entity's collection.
+    pub ui_index: i16,
+    /// The width of the label.
+    pub width: f64,
+}
+
 /// A leader line: the points it runs through and how it is drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiLeaderLine {
@@ -266,6 +279,8 @@ pub struct MultiLeader {
     pub annotative: bool,
     /// The entity's own arrowheads.
     pub arrow_heads: Vec<MultiLeaderArrowHead>,
+    /// The entity's block attribute labels (R2007 and earlier; none after).
+    pub block_labels: Vec<MultiLeaderBlockLabel>,
     /// Whether the text direction is negative.
     pub text_direction_negative: bool,
     /// The IPE alignment (meaning unknown).
@@ -297,6 +312,7 @@ pub(crate) enum Slot {
     EntityTextStyle,
     EntityBlock,
     ArrowHead(usize),
+    BlockLabel(usize),
 }
 
 fn point(r: &mut BitReader<'_>) -> Result<[f64; 3], BitError> {
@@ -306,8 +322,13 @@ fn point(r: &mut BitReader<'_>) -> Result<[f64; 3], BitError> {
 fn color(
     r: &mut BitReader<'_>,
     strings: &mut Option<BitReader<'_>>,
+    version: Version,
 ) -> Result<MultiLeaderColor, BitError> {
     let index = r.bit_short()?;
+    if version < Version::R2004 {
+        // R2000 states the colour as its index alone.
+        return Ok(MultiLeaderColor { index, packed: 0 });
+    }
     let packed = r.bit_long()? as u32;
     let flags = r.raw_char()?;
     if flags & 1 != 0 {
@@ -319,15 +340,17 @@ fn color(
     Ok(MultiLeaderColor { index, packed })
 }
 
-/// Reads a multileader of R2010 or later: the fields, and the handles they
-/// leave for the handle stream, in the order they are read.
+/// Reads a multileader: the fields, and the handles they leave for the handle
+/// stream, in the order they are read. The fields the specification marks R2010 are
+/// left out of the older layouts, which have the block labels instead.
 pub(crate) fn read_multileader(
     r: &mut BitReader<'_>,
     strings: &mut Option<BitReader<'_>>,
     version: Version,
 ) -> Result<(MultiLeader, Vec<Slot>), BitError> {
     let mut slots = Vec::new();
-    let entity_version = r.bit_short()?;
+    let r2010 = version >= Version::R2010;
+    let entity_version = if r2010 { r.bit_short()? } else { 0 };
 
     // The annotation context: the leader roots.
     let root_count = bounded_count(r, "multileader root count")?;
@@ -364,13 +387,34 @@ pub(crate) fn read_multileader(
                 line_breaks.push(MultiLeaderBreak { segment, pairs });
             }
             let line_index = r.bit_long()?;
-            let line_type = r.bit_short()?;
-            let line_color = color(r, strings)?;
-            slots.push(Slot::LineType(root_at, line_at));
-            let line_weight = r.bit_long()?;
-            let arrow_size = r.bit_double()?;
-            slots.push(Slot::LineArrow(root_at, line_at));
-            let override_flags = r.bit_long()?;
+            let (line_type, line_color, line_weight, arrow_size, override_flags) = if r2010 {
+                let line_type = r.bit_short()?;
+                let line_color = color(r, strings, version)?;
+                slots.push(Slot::LineType(root_at, line_at));
+                let line_weight = r.bit_long()?;
+                let arrow_size = r.bit_double()?;
+                slots.push(Slot::LineArrow(root_at, line_at));
+                let override_flags = r.bit_long()?;
+                (
+                    line_type,
+                    line_color,
+                    line_weight,
+                    arrow_size,
+                    override_flags,
+                )
+            } else {
+                // Older layouts keep these on the entity only; no override of its own.
+                (
+                    0,
+                    MultiLeaderColor {
+                        index: 0,
+                        packed: 0,
+                    },
+                    0,
+                    0.0,
+                    0,
+                )
+            };
             lines.push(MultiLeaderLine {
                 points,
                 breaks: line_breaks,
@@ -384,7 +428,7 @@ pub(crate) fn read_multileader(
                 override_flags,
             });
         }
-        let attachment_direction = r.bit_short()?;
+        let attachment_direction = if r2010 { r.bit_short()? } else { 0 };
         roots.push(MultiLeaderRoot {
             content_valid,
             dog_leg_valid,
@@ -419,10 +463,10 @@ pub(crate) fn read_multileader(
         let height = r.bit_double()?;
         let line_spacing_factor = r.bit_double()?;
         let line_spacing_style = r.bit_short()?;
-        let text_color = color(r, strings)?;
+        let text_color = color(r, strings, version)?;
         let alignment = r.bit_short()?;
         let flow_direction = r.bit_short()?;
-        let background_color = color(r, strings)?;
+        let background_color = color(r, strings, version)?;
         let background_scale = r.bit_double()?;
         let background_transparency = r.bit_long()?;
         let background_fill = r.bit()?;
@@ -472,7 +516,7 @@ pub(crate) fn read_multileader(
         let location = point(r)?;
         let block_scale = point(r)?;
         let rotation = r.bit_double()?;
-        let block_color = color(r, strings)?;
+        let block_color = color(r, strings, version)?;
         let mut matrix = [0.0; 16];
         for m in &mut matrix {
             *m = r.bit_double()?;
@@ -493,14 +537,17 @@ pub(crate) fn read_multileader(
     let base_direction = point(r)?;
     let base_vertical = point(r)?;
     let normal_reversed = r.bit()?;
-    let top_attachment = r.bit_short()?;
-    let bottom_attachment = r.bit_short()?;
+    let (top_attachment, bottom_attachment) = if r2010 {
+        (r.bit_short()?, r.bit_short()?)
+    } else {
+        (0, 0)
+    };
 
     // The settings of the entity itself.
     slots.push(Slot::Style);
     let override_flags = r.bit_long()?;
     let line_type = r.bit_short()?;
-    let line_color = color(r, strings)?;
+    let line_color = color(r, strings, version)?;
     slots.push(Slot::EntityLineType);
     let line_weight = r.bit_long()?;
     let landing_enabled = r.bit()?;
@@ -514,10 +561,10 @@ pub(crate) fn read_multileader(
     let style_right_attachment = r.bit_short()?;
     let text_angle_type = r.bit_short()?;
     let text_alignment_type = r.bit_short()?;
-    let text_color = color(r, strings)?;
+    let text_color = color(r, strings, version)?;
     let text_frame = r.bit()?;
     slots.push(Slot::EntityBlock);
-    let block_color = color(r, strings)?;
+    let block_color = color(r, strings, version)?;
     let block_scale = point(r)?;
     let block_rotation = r.bit_double()?;
     let style_attachment_type = r.bit_short()?;
@@ -531,13 +578,28 @@ pub(crate) fn read_multileader(
         });
         slots.push(Slot::ArrowHead(at));
     }
+    let mut block_labels = Vec::new();
+    if !r2010 {
+        let label_count = bounded_count(r, "multileader block label count")?;
+        for at in 0..label_count {
+            slots.push(Slot::BlockLabel(at));
+            block_labels.push(MultiLeaderBlockLabel {
+                attribute_definition: None,
+                text: text_value(r, strings)?.plain().unwrap_or_default(),
+                ui_index: r.bit_short()?,
+                width: r.bit_double()?,
+            });
+        }
+    }
     let text_direction_negative = r.bit()?;
     let ipe_align = r.bit_short()?;
     let justification = r.bit_short()?;
     let scale_factor = r.bit_double()?;
-    let attachment_direction = r.bit_short()?;
-    let style_top_attachment = r.bit_short()?;
-    let style_bottom_attachment = r.bit_short()?;
+    let (attachment_direction, style_top_attachment, style_bottom_attachment) = if r2010 {
+        (r.bit_short()?, r.bit_short()?, r.bit_short()?)
+    } else {
+        (0, 0, 0)
+    };
     let extended_to_text = if version >= Version::R2013 {
         r.bit()?
     } else {
@@ -590,6 +652,7 @@ pub(crate) fn read_multileader(
             style_attachment_type,
             annotative,
             arrow_heads,
+            block_labels,
             text_direction_negative,
             ipe_align,
             justification,
@@ -625,6 +688,7 @@ impl MultiLeader {
             Slot::EntityTextStyle => self.text_style = handle,
             Slot::EntityBlock => self.block_handle = handle,
             Slot::ArrowHead(at) => self.arrow_heads[at].handle = handle,
+            Slot::BlockLabel(at) => self.block_labels[at].attribute_definition = handle,
         }
     }
 }

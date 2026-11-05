@@ -768,13 +768,24 @@ pub(super) fn convert_entity(
                 Some(m.override_flags as u32),
                 Some(i64::from(m.line_type)),
                 style_type,
-                kept.iter()
-                    .map(|l| (Some(l.override_flags as u32), Some(i64::from(l.line_type)))),
+                // A line states its own overrides from R2010; before that it states none.
+                kept.iter().map(|l| {
+                    if ctx.version >= Version::R2010 {
+                        (Some(l.override_flags as u32), Some(i64::from(l.line_type)))
+                    } else {
+                        (None, None)
+                    }
+                }),
             );
             let arrow_size = uncad_model::model::MultiLeaderEntity::resolve_arrow_size(
                 Some(m.arrow_head_size),
-                kept.iter()
-                    .map(|l| (Some(l.override_flags as u32), Some(l.arrow_size))),
+                kept.iter().map(|l| {
+                    if ctx.version >= Version::R2010 {
+                        (Some(l.override_flags as u32), Some(l.arrow_size))
+                    } else {
+                        (None, None)
+                    }
+                }),
             );
             let content = match &m.content {
                 Some(crate::multileader::MultiLeaderContent::Text(t)) => {

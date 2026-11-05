@@ -1183,7 +1183,9 @@ fn every_real_line_circle_and_arc_reads() {
                         path.display(),
                         entry.handle
                     );
-                    assert_eq!(m.version, 2, "{}: {:#x}", path.display(), entry.handle);
+                    // The entity states its version from R2010; older layouts state none.
+                    let stated = if version >= Version::R2010 { 2 } else { 0 };
+                    assert_eq!(m.version, stated, "{}: {:#x}", path.display(), entry.handle);
                     continue;
                 }
                 Geometry::Image(i) => {

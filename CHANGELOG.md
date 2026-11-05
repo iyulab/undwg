@@ -15,6 +15,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Changed
 
+- Multileaders and multileader styles are read in R2000 to R2007 files too: the fields the specification marks R2010 (the entity version, the per-line overrides, the attachment directions) are left out, the block labels are read instead (`MultiLeader::block_labels`, `MultiLeaderBlockLabel`), and a style whose layout is told by the extended data of the application that wrote it is read in the one layout that fills its data exactly. All 53 multileaders of the corpus agree with the other reader's model field by field.
 - `read_database` lists an insertion's attributes at the top level as well, right after the insertion, as the model's contract says.
 - Arc-length dimensions are read in R2000 files too: the class can occur there.
 - The arc point of an arc-length dimension without a leader is the first leader point the record stores, as it is for one with a leader (the record keeps the point either way).

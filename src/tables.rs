@@ -596,9 +596,8 @@ pub struct MleaderStyle {
     pub leader_type: i16,
 }
 
-/// Reads the multileader style at `entry` (R2010 and later); `Ok(None)` when
-/// the object is of another kind or of a version whose layout this reader
-/// does not read. The fields are those of the public file specification and
+/// Reads the multileader style at `entry`; `Ok(None)` when the object is of
+/// another kind. The fields are those of the public file specification and
 /// must fill the object's main data exactly.
 pub fn read_mleader_style(
     objects: &[u8],
@@ -606,24 +605,60 @@ pub fn read_mleader_style(
     version: Version,
     classes: &[ClassDef],
 ) -> Result<Option<MleaderStyle>, ObjectError> {
-    if version < Version::R2010 {
-        return Ok(None);
-    }
     let is_style = |code: u16| {
         code >= 500
             && classes
                 .iter()
                 .any(|c| i32::from(c.number) == i32::from(code) && c.dxf_name == "MLEADERSTYLE")
     };
-    let Some(Prefix { mut r, layout, .. }) = open_prefix(objects, entry, version, is_style)? else {
+    let Some(Prefix { r, layout, .. }) = open_prefix(objects, entry, version, is_style)? else {
         return Ok(None);
     };
-    let mut strings = layout.strings.map(|(from, _)| {
-        let mut s = r.clone();
-        s.seek(from);
-        s
-    });
-    r.bit_short()?; // the version
+    let strings_at = layout.strings.map(|(from, _)| from);
+    // Two fields exist only in "the new format": always in R2010 and later, and
+    // before that only when the object carries extended data for the application
+    // ACAD_MLEADERVER. The extended data is not looked up here; the layout that
+    // fills the main data exactly is the one the object has.
+    let attempts: &[bool] = if version >= Version::R2010 {
+        &[true]
+    } else {
+        &[false, true]
+    };
+    for &new_format in attempts {
+        let mut r = r.clone();
+        let mut strings = strings_at.map(|from| {
+            let mut s = r.clone();
+            s.seek(from);
+            s
+        });
+        let read = read_mleader_style_fields(&mut r, &mut strings, version, new_format);
+        match read {
+            Ok(leader_type) if r.position() == layout.main_end => {
+                return Ok(Some(MleaderStyle {
+                    handle: entry.handle,
+                    leader_type,
+                }));
+            }
+            _ => continue,
+        }
+    }
+    Err(ObjectError::Unexpected {
+        what: "multileader style main data length",
+    })
+}
+
+/// The fields of a multileader style, in the order the specification lists them;
+/// returns the leader type.
+fn read_mleader_style_fields(
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+    new_format: bool,
+) -> Result<i16, BitError> {
+    let r2010 = version >= Version::R2010;
+    if r2010 {
+        r.bit_short()?; // the version
+    }
     r.bit_short()?; // the content type
     r.bit_short()?; // draw order of the multileader
     r.bit_short()?; // draw order of the leader
@@ -631,25 +666,29 @@ pub fn read_mleader_style(
     r.bit_double()?; // the first segment angle
     r.bit_double()?; // the second segment angle
     let leader_type = r.bit_short()?;
-    read_table_color(&mut r, &mut strings, version)?; // the line colour
+    read_table_color(r, strings, version)?; // the line colour
     r.bit_long()?; // the line weight
     r.bit()?; // landing enabled
     r.bit_double()?; // the landing gap
     r.bit()?; // dog-leg enabled
     r.bit_double()?; // the landing distance
-    text_value(&mut r, &mut strings)?; // the description
+    text_value(r, strings)?; // the description
     r.bit_double()?; // the arrowhead size
-    text_value(&mut r, &mut strings)?; // the default text
+    text_value(r, strings)?; // the default text
     r.bit_short()?; // the left attachment
     r.bit_short()?; // the right attachment
-    r.bit_short()?; // the text angle type
+    if new_format || r2010 {
+        r.bit_short()?; // the text angle type
+    }
     r.bit_short()?; // the text alignment type
-    read_table_color(&mut r, &mut strings, version)?; // the text colour
+    read_table_color(r, strings, version)?; // the text colour
     r.bit_double()?; // the text height
     r.bit()?; // the text frame
-    r.bit()?; // always align text left
+    if new_format || r2010 {
+        r.bit()?; // always align text left
+    }
     r.bit_double()?; // the align space
-    read_table_color(&mut r, &mut strings, version)?; // the block colour
+    read_table_color(r, strings, version)?; // the block colour
     r.point_3bd()?; // the block scale
     r.bit()?; // block scale enabled
     r.bit_double()?; // the block rotation
@@ -659,21 +698,15 @@ pub fn read_mleader_style(
     r.bit()?; // property changed
     r.bit()?; // annotative
     r.bit_double()?; // the break size
-    r.bit_short()?; // the attachment direction
-    r.bit_short()?; // the top attachment
-    r.bit_short()?; // the bottom attachment
+    if r2010 {
+        r.bit_short()?; // the attachment direction
+        r.bit_short()?; // the top attachment
+        r.bit_short()?; // the bottom attachment
+    }
     if version >= Version::R2013 {
         r.bit()?; // the leader is extended to the text
     }
-    if r.position() != layout.main_end {
-        return Err(ObjectError::Unexpected {
-            what: "multileader style main data length",
-        });
-    }
-    Ok(Some(MleaderStyle {
-        handle: entry.handle,
-        leader_type,
-    }))
+    Ok(leader_type)
 }
 
 /// A multiline style: the lines a multiline is drawn with.
