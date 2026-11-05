@@ -26,8 +26,8 @@ use crate::entities::{self, read_entity_with_classes, Geometry};
 use crate::objects::ObjectEntry;
 use crate::tables::{
     read_appid_name, read_block_control, read_block_header, read_dim_style, read_dimstyle_name,
-    read_image_definition, read_layer, read_layout, read_linetype_name, read_mline_style,
-    read_mlinestyle_name, read_style_name, BlockHeader, Layer,
+    read_image_definition, read_layer, read_layout, read_linetype_name, read_mleader_style,
+    read_mline_style, read_mlinestyle_name, read_style_name, BlockHeader, Layer,
 };
 use crate::version::Version;
 
@@ -157,6 +157,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let mut dim_style_rows: Vec<crate::tables::DimStyle> = Vec::new();
     let mut image_defs: BTreeMap<u64, crate::tables::ImageDefinition> = BTreeMap::new();
     let mut mline_styles: BTreeMap<u64, TextValue> = BTreeMap::new();
+    let mut mleader_styles: BTreeMap<u64, i16> = BTreeMap::new();
     let mut headers: Vec<BlockHeader> = Vec::new();
     let mut table_order: Vec<Option<u64>> = Vec::new();
     for e in &entries {
@@ -247,6 +248,17 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             Ok(None) => {}
             Err(_) => {
                 notes.add("multiline style that could not be read");
+                continue;
+            }
+        }
+        match read_mleader_style(objects, *e, version, drawing.classes()) {
+            Ok(Some(style)) => {
+                mleader_styles.insert(e.handle, style.leader_type);
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                notes.add("multileader style that could not be read");
                 continue;
             }
         }
@@ -410,6 +422,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         styles: &styles,
         dim_styles: &dim_styles,
         mline_styles: &mline_styles,
+        mleader_styles: &mleader_styles,
         acad,
         block_names: &block_names,
         vertices_2d: &vertices_2d,

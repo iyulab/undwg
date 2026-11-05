@@ -9,7 +9,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `MultiLeader` and `Geometry::MultiLeader`: the multileader entity of R2010 and later -- its leader roots, each with the lines that
   reach it (points, breaks, line type, colour, weight, arrowhead), the text or block it points out, and the settings the entity
   states for itself. The fields follow the public file specification; every multileader of the corpus (47, R2010 to R2018) fills its
-  object's data exactly. The conversion to the model does not use it yet: a multileader still converts as an unknown entity.
+  object's data exactly. `read_database` converts it to the model's multileader entity -- its leader roots and lines, its line type
+  (the entity's own, or the style's, or each line's, as the format layers them), its arrowhead size, and its text or block -- and
+  `read_mleader_style` reads the style an entity names (R2010 and later) for the line type. All 47 multileaders of the corpus agree
+  with the other reader's model field by field.
 - `CodePage` and `Drawing::code_page`: a drawing before R2007 stores its text as bytes in the code page the file header declares
   by number, and `read_database` now turns text past ASCII into characters through that page. The public file specification
   gives no table of numbers, so only numbers observed against a second statement of the same drawing are known -- 28, 29 and
@@ -68,3 +71,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `read_style_name`, `read_appid_name`, `read_mline_style`, `read_layout`: the names of the text styles and registered applications, the multiline styles and the layouts.
 - The leaders of R2010 and later are read: those files leave out the size of the text box, which earlier files state after the end-point projection (`Leader::box_height` and `box_width` are `Option`). Wipeouts are read the way a raster image is. The gradient of a hatch is kept (`Hatch::gradient`). `Image::clip_inside` is now `clip_mode`, the bit as stored.
 - An entity of a kind this reader does not read is returned as `Geometry::Unread(name)` with its common data and references instead of being left out.
+
+### Changed
+
+- Depends on `uncad-model` 0.12.0: entity IDs are decimal strings in the model this crate builds.

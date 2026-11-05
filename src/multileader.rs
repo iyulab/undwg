@@ -71,8 +71,10 @@ pub struct MultiLeaderBreak {
 /// run to it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiLeaderRoot {
-    /// Whether the root has content.
+    /// Whether the root has content (and so a last leader line point).
     pub content_valid: bool,
+    /// Whether the root has a dog-leg.
+    pub dog_leg_valid: bool,
     /// The point the lines connect at.
     pub connection_point: [f64; 3],
     /// The direction the root leaves the content in.
@@ -332,7 +334,7 @@ pub(crate) fn read_multileader(
     let mut roots = Vec::with_capacity(root_count);
     for root_at in 0..root_count {
         let content_valid = r.bit()?;
-        r.bit()?; // written true
+        let dog_leg_valid = r.bit()?;
         let connection_point = point(r)?;
         let direction = point(r)?;
         let break_count = bounded_count(r, "multileader break count")?;
@@ -385,6 +387,7 @@ pub(crate) fn read_multileader(
         let attachment_direction = r.bit_short()?;
         roots.push(MultiLeaderRoot {
             content_valid,
+            dog_leg_valid,
             connection_point,
             direction,
             breaks,

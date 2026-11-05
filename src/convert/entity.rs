@@ -74,6 +74,8 @@ pub(super) struct Context<'a> {
     pub(super) styles: &'a BTreeMap<u64, TextValue>,
     pub(super) dim_styles: &'a BTreeMap<u64, TextValue>,
     pub(super) mline_styles: &'a BTreeMap<u64, TextValue>,
+    /// The leader type each multileader style states.
+    pub(super) mleader_styles: &'a BTreeMap<u64, i16>,
     /// The handle of the application named ACAD, which keeps dimension overrides.
     pub(super) acad: Option<u64>,
     pub(super) block_names: &'a BTreeMap<u64, String>,
@@ -624,11 +626,95 @@ pub(super) fn convert_entity(
             common,
             type_name: name.clone(),
         },
-        // Until the multileader is converted it is kept the way a kind that is not read is.
-        Geometry::MultiLeader(_) => Entity::Unknown {
-            common,
-            type_name: "MULTILEADER".to_string(),
-        },
+        Geometry::MultiLeader(m) => {
+            // A root with no content has no last leader line point, and one the file
+            // marks without a dog-leg has none; a line of no point is no line.
+            let kept: Vec<&crate::multileader::MultiLeaderLine> = m
+                .roots
+                .iter()
+                .flat_map(|root| root.lines.iter())
+                .filter(|line| !line.points.is_empty())
+                .collect();
+            let leaders = m
+                .roots
+                .iter()
+                .map(|root| uncad_model::model::LeaderRoot {
+                    lines: root
+                        .lines
+                        .iter()
+                        .filter(|line| !line.points.is_empty())
+                        .map(|line| line.points.iter().copied().map(point).collect())
+                        .collect(),
+                    last_point: root.content_valid.then(|| point(root.connection_point)),
+                    dogleg: root.dog_leg_valid.then(|| uncad_model::model::Dogleg {
+                        direction: point(root.direction),
+                        length: root.landing_distance,
+                    }),
+                })
+                .collect();
+            let style_type = m
+                .style
+                .and_then(|h| ctx.mleader_styles.get(&h))
+                .map(|t| i64::from(*t));
+            let line_type = uncad_model::model::LeaderLineType::resolve(
+                Some(m.override_flags as u32),
+                Some(i64::from(m.line_type)),
+                style_type,
+                kept.iter()
+                    .map(|l| (Some(l.override_flags as u32), Some(i64::from(l.line_type)))),
+            );
+            let arrow_size = uncad_model::model::MultiLeaderEntity::resolve_arrow_size(
+                Some(m.arrow_head_size),
+                kept.iter()
+                    .map(|l| (Some(l.override_flags as u32), Some(l.arrow_size))),
+            );
+            let content = match &m.content {
+                Some(crate::multileader::MultiLeaderContent::Text(t)) => {
+                    Some(uncad_model::model::MultiLeaderContent::MText(
+                        uncad_model::model::MultiLeaderText {
+                            text: t.text.clone(),
+                            style_name: named(ctx.styles, t.style, ctx.page),
+                            location: point(t.location),
+                            direction: point(t.direction),
+                            extrusion: point(t.normal),
+                            height: m.text_height,
+                            line_spacing_factor: t.line_spacing_factor,
+                            rotation: t.rotation,
+                            width: t.width,
+                            scale: m.scale,
+                            attachment: uncad_model::model::MTextAttachment::from_code(i64::from(
+                                t.alignment,
+                            )),
+                        },
+                    ))
+                }
+                Some(crate::multileader::MultiLeaderContent::Block(b)) => {
+                    Some(uncad_model::model::MultiLeaderContent::Block(
+                        uncad_model::model::MultiLeaderBlock {
+                            block_name: match b.record {
+                                None => Ref::Absent,
+                                Some(h) => match ctx.block_names.get(&h) {
+                                    Some(n) => Ref::Resolved(n.clone()),
+                                    None => Ref::Unresolved(hex(h)),
+                                },
+                            },
+                            location: point(b.location),
+                            scale: point(b.scale),
+                            rotation: b.rotation,
+                            extrusion: point(b.normal),
+                        },
+                    ))
+                }
+                None => None,
+            };
+            Entity::MultiLeader(uncad_model::model::MultiLeaderEntity {
+                common,
+                leaders,
+                line_type,
+                arrow_size,
+                content,
+            })
+        }
         _ => return None,
     })
 }
