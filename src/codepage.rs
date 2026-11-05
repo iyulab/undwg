@@ -36,6 +36,17 @@ impl CodePage {
         })
     }
 
+    /// The name the DXF files of the same drawings give the page a number
+    /// names (`$DWGCODEPAGE`), for the numbers in the table; `None` for any other.
+    pub fn name_of(number: u16) -> Option<&'static str> {
+        match number {
+            28 => Some("ANSI_1250"),
+            29 => Some("ANSI_1251"),
+            30 => Some("ANSI_1252"),
+            _ => None,
+        }
+    }
+
     /// No page: only ASCII text can be read.
     pub const UNKNOWN: CodePage = CodePage(None);
 
@@ -57,6 +68,13 @@ impl CodePage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_known_numbers_have_the_names_their_dxf_files_give() {
+        assert_eq!(CodePage::name_of(30), Some("ANSI_1252"));
+        assert_eq!(CodePage::name_of(28), Some("ANSI_1250"));
+        assert_eq!(CodePage::name_of(40), None);
+    }
 
     #[test]
     fn only_the_numbers_observed_against_a_twin_are_known() {

@@ -29,6 +29,7 @@ use crate::tables::{
     read_image_definition, read_layer, read_layout, read_linetype_name, read_mleader_style,
     read_mline_style, read_mlinestyle_name, read_style_name, BlockHeader, Layer,
 };
+use crate::variables::HeaderVariables;
 use crate::version::Version;
 
 mod entity;
@@ -127,8 +128,31 @@ fn point(p: [f64; 3]) -> Point3D {
     }
 }
 
+/// What a drawing states about itself that the entity model leaves out.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawingFacts {
+    /// The version the file is.
+    pub version: Version,
+    /// The code page number the file header declares.
+    pub code_page: u16,
+    /// The header variables.
+    pub variables: HeaderVariables,
+    /// The name of the layer the header calls current; `None` when the header
+    /// names no layer the layer table has, or the name is a text this reader
+    /// cannot turn into characters.
+    pub current_layer: Option<String>,
+}
+
 /// Reads the drawing in `bytes` into the entity model.
 pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
+    read_database_with_facts(bytes).map(|(database, _)| database)
+}
+
+/// Reads the drawing in `bytes` into the entity model, and returns beside it
+/// what the file states about itself ([`DrawingFacts`]) from the same read.
+pub fn read_database_with_facts(
+    bytes: &[u8],
+) -> Result<(CadDatabase, DrawingFacts), DatabaseError> {
     let drawing = Drawing::open(bytes)?;
     let version = drawing.version();
     let page = CodePage::of(drawing.code_page());
@@ -733,7 +757,16 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         pdsize: Some(vars.point_size),
     };
 
-    Ok(CadDatabase {
+    let current_layer = layers
+        .get(&vars.current_layer)
+        .and_then(|layer| characters(&layer.name, page));
+    let facts = DrawingFacts {
+        version,
+        code_page: drawing.code_page(),
+        variables: vars.clone(),
+        current_layer,
+    };
+    let database = CadDatabase {
         entities: top_level,
         tables: Tables {
             layers: layer_records,
@@ -745,7 +778,8 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         },
         header,
         read_diagnostics: notes.into_diagnostics(),
-    })
+    };
+    Ok((database, facts))
 }
 
 #[cfg(test)]

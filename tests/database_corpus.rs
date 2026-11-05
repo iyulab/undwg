@@ -60,6 +60,27 @@ fn every_real_file_reads_into_a_consistent_drawing() {
         // The same bytes, the same drawing.
         let again = undwg::read_database(&bytes).expect("a second read");
         assert_eq!(db, again, "{}: two reads differ", path.display());
+        // Asking for the facts too reads the same model, and the facts agree with the header.
+        let (with_facts, facts) =
+            undwg::read_database_with_facts(&bytes).expect("a read with facts");
+        assert_eq!(
+            db,
+            with_facts,
+            "{}: the facts read changed the model",
+            path.display()
+        );
+        assert_eq!(
+            facts.version.name(),
+            undwg::detect_version(&bytes).expect("version").name(),
+            "{}",
+            path.display()
+        );
+        assert_eq!(
+            facts.variables.insertion_units as u16,
+            db.header.insunits.expect("insunits"),
+            "{}",
+            path.display()
+        );
         let json = db.to_json(ToJsonOptions::default()).expect("json");
         assert_eq!(
             json,

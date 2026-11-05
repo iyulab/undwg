@@ -38,7 +38,7 @@ mod version;
 pub use bits::{BitError, BitReader, EndOfData, HandleRef, TextValue};
 pub use classes::{read_classes, ClassDef, ClassError};
 pub use codepage::CodePage;
-pub use convert::{read_database, DatabaseError};
+pub use convert::{read_database, read_database_with_facts, DatabaseError, DrawingFacts};
 pub use drawing::{Drawing, DrawingError};
 pub use entities::{
     read_entity, read_entity_links, read_entity_with_classes, Arc, Attribute, Circle, CommonEntity,
