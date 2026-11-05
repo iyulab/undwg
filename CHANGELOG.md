@@ -6,6 +6,12 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Added
 
+- `CodePage` and `Drawing::code_page`: a drawing before R2007 stores its text as bytes in the code page the file header declares
+  by number, and `read_database` now turns text past ASCII into characters through that page. The public file specification
+  gives no table of numbers, so only numbers observed against a second statement of the same drawing are known -- 28, 29 and
+  30, which DXF files of the same drawings name `ANSI_1250`, `ANSI_1251` and `ANSI_1252` -- and any other number is not
+  decoded: its text stays as bytes and the conversion reports it, as before, rather than guess a page. Dependency added:
+  `encoding_rs` (licence `(Apache-2.0 OR MIT) AND BSD-3-Clause`; `BSD-3-Clause` joins the allowed licences).
 - `detect_version`: the version a DWG file declares in its first six bytes. R2000 to R2018 (`AC1015` to `AC1032`) are read; R13 and R14 are named and refused; anything else is an error that shows the bytes it found.
 - A corpus test that checks, file by file, that the answer agrees with the six bytes.
 - `read_header`: the file header. For R2000 the section-locator list, with its 16-bit checksum and closing sentinel checked; for R2004, R2010, R2013 and R2018 the masked header block is unmasked, its identifier and 32-bit checksum checked, and the positions of the page map and section map returned. R2007 is an explicit "not read yet" error. A checksum, identifier or sentinel that does not match is an error that says what was found.

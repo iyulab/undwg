@@ -21,6 +21,7 @@
 mod bits;
 mod checksum;
 mod classes;
+mod codepage;
 mod convert;
 mod drawing;
 mod entities;
@@ -34,6 +35,7 @@ mod version;
 
 pub use bits::{BitError, BitReader, EndOfData, HandleRef, TextValue};
 pub use classes::{read_classes, ClassDef, ClassError};
+pub use codepage::CodePage;
 pub use convert::{read_database, DatabaseError};
 pub use drawing::{Drawing, DrawingError};
 pub use entities::{

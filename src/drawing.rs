@@ -84,6 +84,8 @@ impl From<ObjectError> for DrawingError {
 #[derive(Debug, Clone)]
 pub struct Drawing<'a> {
     version: Version,
+    /// The code page number the file header declares (see [`CodePage`](crate::CodePage)).
+    code_page: u16,
     /// The bytes object positions count from: the whole file for R2000, the
     /// assembled object section from R2004.
     objects: Cow<'a, [u8]>,
@@ -108,6 +110,7 @@ impl<'a> Drawing<'a> {
                     .ok_or(DrawingError::Missing("header variables"))?;
                 Ok(Drawing {
                     version: Version::R2000,
+                    code_page: header.code_page,
                     objects: Cow::Borrowed(bytes),
                     entries: read_object_map(map)?,
                     classes: read_classes(classes, Version::R2000)?,
@@ -124,6 +127,7 @@ impl<'a> Drawing<'a> {
                 let variables = get("AcDb:Header")?;
                 Ok(Drawing {
                     version,
+                    code_page: header.code_page,
                     objects: Cow::Owned(get("AcDb:AcDbObjects")?),
                     entries: read_object_map(&map)?,
                     classes: read_classes(&classes, version)?,
@@ -136,6 +140,12 @@ impl<'a> Drawing<'a> {
     /// The version the file is.
     pub fn version(&self) -> Version {
         self.version
+    }
+
+    /// The code page number the file header declares. Text before R2007 is bytes in this page; which page a
+    /// number names is [`CodePage::of`](crate::CodePage::of).
+    pub fn code_page(&self) -> u16 {
+        self.code_page
     }
 
     /// The bytes objects are read from, with the entries of

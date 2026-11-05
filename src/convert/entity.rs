@@ -17,6 +17,7 @@ use uncad_model::model::{
 use uncad_model::Entity;
 
 use crate::bits::TextValue;
+use crate::codepage::CodePage;
 use crate::entities::{self, read_entity_links, Geometry};
 use crate::objects::ObjectEntry;
 use crate::version::Version;
@@ -78,6 +79,8 @@ pub(super) struct Context<'a> {
     pub(super) block_names: &'a BTreeMap<u64, String>,
     pub(super) vertices_2d: &'a BTreeMap<u64, entities::Vertex2d>,
     pub(super) vertices_3d: &'a BTreeMap<u64, entities::Vertex3d>,
+    /// How the drawing's code page text becomes characters.
+    pub(super) page: CodePage,
 }
 
 pub(super) fn point2(p: [f64; 2]) -> Point2D {
@@ -108,13 +111,13 @@ pub(super) fn convert_text(
     ctx: &Context<'_>,
     notes: &mut Notes,
 ) -> Option<TextFields> {
-    let Some(value) = characters(&t.value) else {
+    let Some(value) = characters(&t.value, ctx.page) else {
         notes.add("text in a code page that is not read");
         return None;
     };
     let style = match ctx.styles.get(&t.style) {
         None => Ref::Unresolved(hex(t.style)),
-        Some(n) => match characters(n) {
+        Some(n) => match characters(n, ctx.page) {
             Some(n) => Ref::Resolved(n),
             None => Ref::Unresolved(hex(t.style)),
         },
@@ -154,10 +157,14 @@ pub(super) fn convert_text(
 }
 
 /// The name a handle points at in a table of names, as a model reference.
-pub(super) fn named(table: &BTreeMap<u64, TextValue>, handle: Option<u64>) -> Ref<String> {
+pub(super) fn named(
+    table: &BTreeMap<u64, TextValue>,
+    handle: Option<u64>,
+    page: CodePage,
+) -> Ref<String> {
     match handle {
         None => Ref::Absent,
-        Some(h) => match table.get(&h).and_then(characters) {
+        Some(h) => match table.get(&h).and_then(|n| characters(n, page)) {
             Some(n) => Ref::Resolved(n),
             None => Ref::Unresolved(hex(h)),
         },
@@ -300,7 +307,7 @@ pub(super) fn convert_entity(
         }
         Geometry::Attdef(a) => {
             let t = convert_text(&a.text, ctx, notes)?;
-            let Some(tag) = characters(&a.tag) else {
+            let Some(tag) = characters(&a.tag, ctx.page) else {
                 notes.add("attribute tag in a code page that is not read");
                 return None;
             };
@@ -346,13 +353,13 @@ pub(super) fn convert_entity(
             })
         }
         Geometry::Mtext(m) => {
-            let Some(text) = characters(&m.value) else {
+            let Some(text) = characters(&m.value, ctx.page) else {
                 notes.add("text in a code page that is not read");
                 return None;
             };
             let style_name = match ctx.styles.get(&m.style) {
                 None => Ref::Unresolved(hex(m.style)),
-                Some(n) => match characters(n) {
+                Some(n) => match characters(n, ctx.page) {
                     Some(n) => Ref::Resolved(n),
                     None => Ref::Unresolved(hex(m.style)),
                 },
@@ -422,7 +429,7 @@ pub(super) fn convert_entity(
             closed: p.closed_flags & 1 != 0,
         }),
         Geometry::Tolerance(t) => {
-            let Some(text_value) = characters(&t.text) else {
+            let Some(text_value) = characters(&t.text, ctx.page) else {
                 notes.add("text in a code page that is not read");
                 return None;
             };
@@ -432,7 +439,7 @@ pub(super) fn convert_entity(
                 text_height: None,
                 text_value,
                 direction: Some(point(t.x_direction)),
-                style_name: named(ctx.dim_styles, t.style),
+                style_name: named(ctx.dim_styles, t.style, ctx.page),
             })
         }
         Geometry::Mline(m) => Entity::MLine(MLineEntity {
@@ -446,7 +453,7 @@ pub(super) fn convert_entity(
                 })
                 .collect(),
             closed: m.open_closed == 3,
-            mlinestyle_name: named(ctx.mline_styles, m.style),
+            mlinestyle_name: named(ctx.mline_styles, m.style, ctx.page),
             scale: Some(m.scale),
         }),
         Geometry::Viewport(v) => Entity::Viewport(ViewportEntity {
@@ -474,7 +481,7 @@ pub(super) fn convert_entity(
                 .collect(),
         }),
         Geometry::Dimension(d) => {
-            let text_override = match characters(&d.user_text) {
+            let text_override = match characters(&d.user_text, ctx.page) {
                 None => {
                     notes.add("text in a code page that is not read");
                     return None;
@@ -520,7 +527,7 @@ pub(super) fn convert_entity(
                 },
                 rotation: d.rotation.unwrap_or(0.0),
                 text_rotation: d.text_rotation,
-                style_name: named(ctx.dim_styles, d.style),
+                style_name: named(ctx.dim_styles, d.style, ctx.page),
                 ordinate_axis: d.ordinate_flags.map(|f| {
                     if f & 1 != 0 {
                         OrdinateAxis::X
@@ -534,7 +541,7 @@ pub(super) fn convert_entity(
         Geometry::Hatch(h) => {
             let gradient = match &h.gradient {
                 None => None,
-                Some(g) => match hatch_gradient(g) {
+                Some(g) => match hatch_gradient(g, ctx.page) {
                     Some(g) => Some(g),
                     None => {
                         notes.add(
@@ -608,7 +615,7 @@ pub(super) fn convert_entity(
                 Some(h) => Ref::Resolved(EntityId::new(h)),
                 None => Ref::Absent,
             },
-            style_name: named(ctx.dim_styles, l.style),
+            style_name: named(ctx.dim_styles, l.style, ctx.page),
             style_overrides: Some(style_overrides(entity, ctx)),
         }),
         // An entity of a kind this reader does not read keeps its common data and
@@ -643,7 +650,10 @@ pub(super) fn image_boundary(i: &entities::Image) -> Vec<Point2D> {
 /// A colour long names a palette colour (`0xC3`) or is a 24-bit RGB value; a
 /// single-colour gradient fades its colour by the tint, and a two-colour one runs
 /// from the first stop to the last.
-pub(super) fn hatch_gradient(g: &entities::HatchGradient) -> Option<ModelHatchGradient> {
+pub(super) fn hatch_gradient(
+    g: &entities::HatchGradient,
+    page: CodePage,
+) -> Option<ModelHatchGradient> {
     let rgb = |packed: u32| -> Option<u32> {
         if packed >> 24 == 0xC3 {
             uncad_model::color::aci_to_rgb((packed & 0xFFFF) as u16)
@@ -666,7 +676,7 @@ pub(super) fn hatch_gradient(g: &entities::HatchGradient) -> Option<ModelHatchGr
         let (_, c) = *stops.first()?;
         (c, Some(c), 0.0)
     };
-    let name = characters(&g.name).map(|n| n.to_ascii_uppercase());
+    let name = characters(&g.name, page).map(|n| n.to_ascii_uppercase());
     Some(ModelHatchGradient {
         is_radial: matches!(name.as_deref(), Some("SPHERICAL" | "HEMISPHERICAL")),
         angle: g.angle,
@@ -754,7 +764,7 @@ pub(super) fn hatch_path(path: &entities::HatchPath) -> HatchBoundaryPath {
 
 /// What every entity states, in the model's words.
 pub(super) fn convert_common(entity: &entities::Entity, ctx: &Context<'_>) -> EntityCommon {
-    let (version, layers, linetypes) = (ctx.version, ctx.layers, ctx.linetypes);
+    let (version, layers, linetypes, page) = (ctx.version, ctx.layers, ctx.linetypes, ctx.page);
     let c = &entity.common;
     let refs = &entity.references;
     let layer = match layers.get(&refs.layer) {
@@ -770,7 +780,7 @@ pub(super) fn convert_common(entity: &entities::Entity, ctx: &Context<'_>) -> En
         2 => EntityLinetype::Named(Ref::Resolved("Continuous".to_string())),
         _ => EntityLinetype::Named(match refs.linetype {
             None => Ref::Absent,
-            Some(h) => match linetypes.get(&h).and_then(characters) {
+            Some(h) => match linetypes.get(&h).and_then(|n| characters(n, page)) {
                 Some(n) => Ref::Resolved(n),
                 None => Ref::Unresolved(hex(h)),
             },

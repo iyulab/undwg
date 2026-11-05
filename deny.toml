@@ -17,6 +17,8 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Unicode-3.0",
+    # `encoding_rs` (the code page tables) is "(Apache-2.0 OR MIT) AND BSD-3-Clause": its encoding data is BSD-3-Clause.
+    "BSD-3-Clause",
 ]
 # Deliberately absent: MPL-2.0, EPL, CDDL and the LGPLs. They are weak
 # copyleft, not permissive.

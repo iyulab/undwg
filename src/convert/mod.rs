@@ -20,6 +20,7 @@ use uncad_model::text::decode_escapes;
 use uncad_model::{CadDatabase, Entity, HeaderVariables as ModelHeader, ReadDiagnostics};
 
 use crate::bits::TextValue;
+use crate::codepage::CodePage;
 use crate::drawing::{Drawing, DrawingError};
 use crate::entities::{self, read_entity_with_classes, Geometry};
 use crate::objects::ObjectEntry;
@@ -99,13 +100,14 @@ impl Notes {
     }
 }
 
-/// A text as characters. A text in a code page other than ASCII cannot be
-/// turned into characters without knowing the page, so it is not guessed.
-fn characters(t: &TextValue) -> Option<String> {
+/// A text as characters. Text past ASCII in a code page is turned into characters only through a page that is
+/// known (see [`CodePage`]); with an unknown page it is not guessed.
+fn characters(t: &TextValue, page: CodePage) -> Option<String> {
     let stored = match t {
         TextValue::Unicode(s) => s.clone(),
         TextValue::Ansi(b) if b.is_ascii() => String::from_utf8_lossy(b).into_owned(),
-        TextValue::Ansi(_) => return None,
+        // Past ASCII the bytes mean what the drawing's code page says -- and nothing when the page is not known.
+        TextValue::Ansi(b) => page.decode(b)?,
     };
     // A file stores the characters its code page lacks as `\U+XXXX`; the model's
     // strings do not depend on how a file stored them. (`\M+` names a character
@@ -129,6 +131,7 @@ fn point(p: [f64; 3]) -> Point3D {
 pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let drawing = Drawing::open(bytes)?;
     let version = drawing.version();
+    let page = CodePage::of(drawing.code_page());
     let objects = drawing.objects();
     let mut notes = Notes::default();
 
@@ -260,7 +263,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         }
         match read_appid_name(objects, *e, version) {
             Ok(Some(name)) => {
-                if matches!(characters(&name).as_deref(), Some(n) if n.eq_ignore_ascii_case("ACAD"))
+                if matches!(characters(&name, page).as_deref(), Some(n) if n.eq_ignore_ascii_case("ACAD"))
                 {
                     acad = Some(e.handle);
                 }
@@ -304,7 +307,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let mut stored_names: BTreeMap<u64, String> = BTreeMap::new();
     let mut uses: BTreeMap<String, usize> = BTreeMap::new();
     for block in &headers {
-        let Some(stored) = characters(&block.name) else {
+        let Some(stored) = characters(&block.name, page) else {
             notes.add("block name in a code page that is not read");
             continue;
         };
@@ -335,7 +338,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let mut layer_names: BTreeMap<u64, String> = BTreeMap::new();
     let mut layer_records: BTreeMap<String, LayerRecord> = BTreeMap::new();
     for (handle, layer) in &layers {
-        let Some(name) = characters(&layer.name) else {
+        let Some(name) = characters(&layer.name, page) else {
             notes.add("layer name in a code page that is not read");
             continue;
         };
@@ -353,7 +356,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
         };
         let linetype = match layer.linetype {
             None => Ref::Absent,
-            Some(h) => match linetypes.get(&h).and_then(characters) {
+            Some(h) => match linetypes.get(&h).and_then(|n| characters(n, page)) {
                 Some(n) => Ref::Resolved(n),
                 None => Ref::Unresolved(hex(h)),
             },
@@ -399,6 +402,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     }
     let ctx = Context {
         version,
+        page,
         objects,
         by_handle: &by_handle,
         layers: &layer_names,
@@ -443,7 +447,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
                         extrusion: text.extrusion,
                     },
                 );
-                if let Some(tag) = characters(&a.tag) {
+                if let Some(tag) = characters(&a.tag, page) {
                     if let Some(x) = attribs.get_mut(&entity.common.handle) {
                         x.tag = tag;
                     }
@@ -543,7 +547,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
             continue;
         };
         let external_reference = if block.is_xref {
-            match characters(&block.xref_path) {
+            match characters(&block.xref_path, page) {
                 Some(path) => Some(ExternalReference {
                     path,
                     overlay: block.xref_overlaid,
@@ -570,7 +574,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     // The multiline styles: each one's line offsets, in the order the style keeps them.
     let mut mline_style_records: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for m in &mline_style_rows {
-        match characters(&m.name) {
+        match characters(&m.name, page) {
             Some(name) => {
                 mline_style_records.insert(name, m.elements.iter().map(|e| e.offset).collect());
             }
@@ -581,7 +585,8 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     // The layouts, by name.
     let mut layout_records: BTreeMap<String, LayoutRecord> = BTreeMap::new();
     for l in &layout_rows {
-        let (Some(name), Some(paper_name)) = (characters(&l.name), characters(&l.paper_size))
+        let (Some(name), Some(paper_name)) =
+            (characters(&l.name, page), characters(&l.paper_size, page))
         else {
             notes.add("layout in a code page that is not read");
             continue;
@@ -644,7 +649,8 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     // The dimension styles, by name.
     let mut dim_style_records: BTreeMap<String, DimStyleRecord> = BTreeMap::new();
     for d in &dim_style_rows {
-        let (Some(name), Some(post)) = (characters(&d.name), characters(&d.post)) else {
+        let (Some(name), Some(post)) = (characters(&d.name, page), characters(&d.post, page))
+        else {
             notes.add("dimension style in a code page that is not read");
             continue;
         };
@@ -680,7 +686,7 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     // The image definitions, by handle (the key an image names its picture by).
     let mut image_definitions: BTreeMap<String, ImageDefinition> = BTreeMap::new();
     for (handle, def) in &image_defs {
-        let file_path = match characters(&def.file_path) {
+        let file_path = match characters(&def.file_path, page) {
             Some(p) => Some(p),
             None => {
                 notes.add("image path in a code page that is not read");
@@ -702,8 +708,8 @@ pub fn read_database(bytes: &[u8]) -> Result<CadDatabase, DatabaseError> {
     let vars = drawing.variables();
     let header = ModelHeader {
         insunits: Some(vars.insertion_units as u16),
-        fingerprintguid: characters(&vars.fingerprint_guid),
-        versionguid: characters(&vars.version_guid),
+        fingerprintguid: characters(&vars.fingerprint_guid, page),
+        versionguid: characters(&vars.version_guid, page),
         pdmode: Some(vars.point_mode),
         pdsize: Some(vars.point_size),
     };
@@ -743,17 +749,30 @@ mod tests {
     }
 
     #[test]
-    fn a_text_in_a_code_page_is_not_turned_into_characters() {
+    fn a_text_in_a_code_page_is_turned_into_characters_only_through_a_known_page() {
+        let unknown = CodePage::UNKNOWN;
         assert_eq!(
-            characters(&TextValue::Unicode("Layer".into())).as_deref(),
+            characters(&TextValue::Unicode("Layer".into()), unknown).as_deref(),
             Some("Layer")
         );
         assert_eq!(
-            characters(&TextValue::Ansi(b"Layer".to_vec())).as_deref(),
+            characters(&TextValue::Ansi(b"Layer".to_vec()), unknown).as_deref(),
             Some("Layer")
         );
-        // A byte above 0x7F means something only in the drawing's code page.
-        assert_eq!(characters(&TextValue::Ansi(vec![b'A', 0xB0])), None);
+        // A byte above 0x7F means something only in the drawing's code page: with no known page it is not guessed ...
+        assert_eq!(
+            characters(&TextValue::Ansi(vec![b'A', 0xB0]), unknown),
+            None
+        );
+        assert_eq!(
+            characters(&TextValue::Ansi(vec![b'A', 0xB0]), CodePage::of(39)),
+            None
+        );
+        // ... and with one it is read through that page.
+        assert_eq!(
+            characters(&TextValue::Ansi(vec![b'A', 0xB0]), CodePage::of(30)).as_deref(),
+            Some("A\u{B0}")
+        );
     }
 
     #[test]
