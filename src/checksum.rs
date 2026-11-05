@@ -88,6 +88,52 @@ pub(crate) fn page_checksum(seed: u32, data: &[u8]) -> u32 {
     (sum2 << 16) | (sum1 & 0xFFFF)
 }
 
+/// How the checksum of an R2007 data page takes the 0 to 7 bytes after its last
+/// whole eight: `(offset, count)` runs, in this order.
+const R2007_TAIL: [&[(usize, usize)]; 8] = [
+    &[],
+    &[(0, 1)],
+    &[(0, 2)],
+    &[(0, 2), (2, 1)],
+    &[(2, 2), (0, 2)],
+    &[(2, 2), (0, 2), (4, 1)],
+    &[(2, 2), (0, 2), (4, 2)],
+    &[(2, 2), (0, 2), (4, 2), (6, 1)],
+];
+
+/// The 32-bit checksum of the decompressed data of an R2007 data page.
+///
+/// It starts from a value derived from the length, keeps two running sums
+/// and reduces them modulo 0xFFF1 every 0x15B0 bytes. Within a block of eight
+/// bytes the pairs are taken last to first.
+pub(crate) fn page_sum_r2007(data: &[u8]) -> u32 {
+    let seed = (data.len() as u64)
+        .wrapping_mul(0x343FD)
+        .wrapping_add(0x269EC3);
+    let mut sum1 = seed & 0xFFFF;
+    let mut sum2 = (seed >> 16) & 0xFFFF;
+    for chunk in data.chunks(0x15B0) {
+        let (blocks, rest) = chunk.as_chunks::<8>();
+        for block in blocks {
+            for at in [6usize, 4, 2, 0] {
+                sum1 += u64::from(block[at]);
+                sum2 += sum1;
+                sum1 += u64::from(block[at + 1]);
+                sum2 += sum1;
+            }
+        }
+        for &(at, count) in R2007_TAIL[rest.len()] {
+            for &byte in &rest[at..at + count] {
+                sum1 += u64::from(byte);
+                sum2 += sum1;
+            }
+        }
+        sum1 %= 0xFFF1;
+        sum2 %= 0xFFF1;
+    }
+    (((sum2 << 16) | (sum1 & 0xFFFF)) & 0xFFFF_FFFF) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,6 +4,11 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- `FileHeader::R2007`, `HeaderR2007`, `read_header_r2007`, `read_directory_r2007`, `read_section_r2007` and the types of the directory (`Directory2007`, `Section2007`, `SectionPage2007`, `PageMapEntry2007`): the container of R2007 (`AC1021`) files. The file header is an error-corrected block; the page map and the section map are Reed-Solomon coded system pages; data pages use a second Reed-Solomon code and R2007's own variant of LZ77. The parity of every codeword is checked, not used to correct, and the 32-bit checksum of every data page is verified, so a damaged page is an error that says which part is wrong. `read_header` now reads an R2007 header instead of naming it as not yet read, and `Drawing::open` reads the container of an R2007 file and then stops at the class definitions, which are not read yet (`ClassError::NotRead`). Every R2007 file of the test corpus (19) assembles, each section to its stated size. The 64-bit checks of the file header and the section map are not read: the parity and the page checksum already decide whether the bytes are intact.
+- `HeaderError::Compression`: the compressed file header record of an R2007 file could not be decompressed.
+
 ## [0.1.0] - 2026-11-05
 
 ### Added

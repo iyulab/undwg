@@ -29,6 +29,7 @@ mod header;
 mod lz;
 mod multileader;
 mod objects;
+mod r2007;
 mod sections;
 mod tables;
 mod variables;
@@ -64,6 +65,10 @@ pub use multileader::{
 };
 pub use objects::{
     read_object_frame, read_object_map, ExtendedData, ObjectEntry, ObjectError, ObjectFrame,
+};
+pub use r2007::{
+    read_directory_r2007, read_header_r2007, read_section_r2007, Directory2007, HeaderR2007,
+    PageMapEntry2007, Section2007, SectionPage2007, PAGES_START,
 };
 pub use sections::{
     read_data_page, read_directory, read_section, DataPageHeader, PageMapEntry, SectionDescription,

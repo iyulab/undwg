@@ -3,7 +3,8 @@
 //! Point `UNDWG_CORPUS` at one or more directories (separated like `PATH`)
 //! holding `.dwg` files. Every file whose version this reader reads must give
 //! a header that passes its own checksum and whose stored offsets lie inside
-//! the file; R2007 files must be named as not yet read. Without the variable
+//! the file; an R2007 header must state the file's length and put the page map
+//! inside it. Without the variable
 //! the test says it skipped and passes -- the files are not part of this
 //! repository.
 
@@ -43,7 +44,6 @@ fn every_real_header_passes_its_checksum_and_points_inside_the_file() {
     assert!(!files.is_empty(), "UNDWG_CORPUS names no .dwg file");
 
     let mut by_version: BTreeMap<String, usize> = BTreeMap::new();
-    let mut not_yet = 0usize;
     let mut refused = 0usize;
     let mut past_end = 0usize;
     for path in &files {
@@ -92,17 +92,25 @@ fn every_real_header_passes_its_checksum_and_points_inside_the_file() {
                     past_end += 1;
                 }
             }
-            Err(HeaderError::NotYetRead(Version::R2007)) => not_yet += 1,
+            Ok(FileHeader::R2007(h)) => {
+                *by_version.entry(Version::R2007.name().into()).or_default() += 1;
+                assert_eq!(h.file_size, len, "{}: stated length", path.display());
+                assert!(
+                    undwg::PAGES_START + h.page_map_address < len,
+                    "{}: page map is outside {len} bytes",
+                    path.display()
+                );
+            }
             Err(HeaderError::Version(_)) => refused += 1,
             Ok(other) => panic!("{}: unexpected header form {other:?}", path.display()),
             Err(other) => panic!("{}: {other}", path.display()),
         }
     }
     eprintln!(
-        "{} files: headers read {:?}; R2007 named not yet read: {not_yet}; other versions refused: {refused}; last-page end address past the file: {past_end}",
+        "{} files: headers read {:?}; other versions refused: {refused}; last-page end address past the file: {past_end}",
         files.len(),
         by_version
     );
     let read: usize = by_version.values().sum();
-    assert_eq!(read + not_yet + refused, files.len());
+    assert_eq!(read + refused, files.len());
 }

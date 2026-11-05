@@ -12,6 +12,7 @@ use std::fmt;
 use crate::classes::{read_classes, ClassDef, ClassError};
 use crate::header::{read_header, FileHeader, HeaderError};
 use crate::objects::{read_object_map, ObjectEntry, ObjectError};
+use crate::r2007::{read_directory_r2007, read_section_r2007};
 use crate::sections::{read_directory, read_section, SectionError};
 use crate::variables::{read_header_variables, HeaderVariables, VariablesError};
 use crate::version::Version;
@@ -115,6 +116,23 @@ impl<'a> Drawing<'a> {
                     entries: read_object_map(map)?,
                     classes: read_classes(classes, Version::R2000)?,
                     variables: read_header_variables(variables, Version::R2000)?,
+                })
+            }
+            FileHeader::R2007(header) => {
+                let directory = read_directory_r2007(bytes, &header)?;
+                let get = |name: &'static str| {
+                    read_section_r2007(bytes, &directory, name)?.ok_or(DrawingError::Missing(name))
+                };
+                let map = get("AcDb:Handles")?;
+                let classes = get("AcDb:Classes")?;
+                let variables = get("AcDb:Header")?;
+                Ok(Drawing {
+                    version: Version::R2007,
+                    code_page: header.code_page,
+                    objects: Cow::Owned(get("AcDb:AcDbObjects")?),
+                    entries: read_object_map(&map)?,
+                    classes: read_classes(&classes, Version::R2007)?,
+                    variables: read_header_variables(&variables, Version::R2007)?,
                 })
             }
             FileHeader::R2004(version, header) => {

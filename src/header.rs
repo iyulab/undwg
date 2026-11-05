@@ -11,8 +11,8 @@
 //!   pseudo-random byte sequence. Unmasked, it holds the position of the
 //!   page map and the section map, guarded by a 32-bit checksum.
 //!
-//! R2007 has a third layout (its header is error-corrected) that this reader
-//! does not read yet; asking for it is an explicit [`HeaderError::NotYetRead`].
+//! * **R2007** has a third layout: its header is a Reed-Solomon codeword block
+//!   (see [`HeaderR2007`](crate::HeaderR2007)).
 //!
 //! Nothing is guessed: a checksum that does not match, a sentinel that is not
 //! the documented one, or a block that does not carry the documented file
@@ -21,6 +21,8 @@
 use std::fmt;
 
 use crate::checksum::{crc16, crc32};
+use crate::lz::LzError;
+use crate::r2007::{read_header_r2007, HeaderR2007};
 use crate::version::{detect_version, Error as VersionError, Version};
 
 /// One entry of the R2000 section-locator list.
@@ -128,6 +130,8 @@ pub enum FileHeader {
     R2000(HeaderR2000),
     /// R2004, R2010, R2013 or R2018.
     R2004(Version, HeaderR2004),
+    /// R2007.
+    R2007(HeaderR2007),
 }
 
 /// Why a file header could not be read.
@@ -162,6 +166,8 @@ pub enum HeaderError {
     /// The R2000 locator list has a length whose checksum constant is not
     /// documented.
     LocatorCount(u32),
+    /// The compressed file header record could not be decompressed.
+    Compression(LzError),
 }
 
 impl fmt::Display for HeaderError {
@@ -191,6 +197,7 @@ impl fmt::Display for HeaderError {
                     "the file header's {what} is not what the format documents"
                 )
             }
+            HeaderError::Compression(e) => write!(f, "the file header record: {e}"),
             HeaderError::LocatorCount(n) => {
                 write!(
                     f,
@@ -216,7 +223,7 @@ impl From<VersionError> for HeaderError {
 pub fn read_header(bytes: &[u8]) -> Result<FileHeader, HeaderError> {
     match detect_version(bytes)? {
         Version::R2000 => read_r2000(bytes).map(FileHeader::R2000),
-        Version::R2007 => Err(HeaderError::NotYetRead(Version::R2007)),
+        Version::R2007 => read_header_r2007(bytes).map(FileHeader::R2007),
         v @ (Version::R2004 | Version::R2010 | Version::R2013 | Version::R2018) => {
             read_r2004(bytes).map(|h| FileHeader::R2004(v, h))
         }
@@ -552,10 +559,13 @@ mod tests {
     }
 
     #[test]
-    fn r2007_is_named_as_not_yet_read() {
+    fn an_r2007_prefix_too_short_for_its_header_is_a_named_error() {
         assert_eq!(
             read_header(b"AC1021\0\0\0\0\0\0\x01"),
-            Err(HeaderError::NotYetRead(Version::R2007))
+            Err(HeaderError::Truncated {
+                needed: 0x480,
+                len: 13
+            })
         );
     }
 
