@@ -16,7 +16,9 @@
 use crate::bits::{BitError, BitReader, TextValue};
 use crate::classes::ClassDef;
 use crate::multileader::{read_multileader, MultiLeader, Slot};
-use crate::objects::{open_object, read_extended_data, ExtendedData, ObjectEntry, ObjectError};
+use crate::objects::{
+    open_object, read_extended_data, ExtendedData, Layout, ObjectEntry, ObjectError, ObjectFrame,
+};
 use crate::version::Version;
 
 /// The type code of an arc.
@@ -2128,47 +2130,7 @@ pub fn read_entity_with_classes(
     classes: &[ClassDef],
 ) -> Result<Option<Entity>, ObjectError> {
     let (mut frame, mut r, layout) = open_object(objects, entry, version)?;
-    // A hatch has the fixed type code 78 in R2000 and is an object of a class
-    // (named by its DXF name) in later versions.
-    if frame.type_code == 78
-        || (frame.type_code >= 500
-            && classes.iter().any(|c| {
-                i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "HATCH"
-            }))
-    {
-        frame.type_code = TYPE_HATCH;
-    }
-    if frame.type_code >= 500
-        && classes
-            .iter()
-            .any(|c| i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "IMAGE")
-    {
-        frame.type_code = TYPE_IMAGE;
-    }
-    // A wipeout is a raster image with no picture: it states the same fields.
-    if frame.type_code >= 500
-        && classes
-            .iter()
-            .any(|c| i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "WIPEOUT")
-    {
-        frame.type_code = TYPE_WIPEOUT;
-    }
-    // An arc-length dimension is an object of a class.
-    if frame.type_code >= 500
-        && classes.iter().any(|c| {
-            i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "ARC_DIMENSION"
-        })
-    {
-        frame.type_code = TYPE_ARC_DIMENSION;
-    }
-    // A multileader is an object of a class too.
-    if frame.type_code >= 500
-        && classes.iter().any(|c| {
-            i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "MULTILEADER"
-        })
-    {
-        frame.type_code = TYPE_MULTILEADER;
-    }
+    refine_type_code(&mut frame, classes);
     // A table is an object of a class; the versions whose layout this reader
     // knows read it whole, and a table that does not read stays an entity of a
     // kind this reader does not read.
@@ -2221,25 +2183,7 @@ pub fn read_entity_with_classes(
                 | TYPE_MULTILEADER
                 | TYPE_ARC_DIMENSION
     ) {
-        // An entity of a kind this reader does not read is still an entity:
-        // its common data and references are read, and the kind is named.
-        let Some(name) = unread_entity_name(frame.type_code, classes) else {
-            return Ok(None);
-        };
-        let (common, flags) = read_common(&mut r, version)?;
-        if common.handle != entry.handle {
-            return Err(ObjectError::Unexpected {
-                what: "entity handle",
-            });
-        }
-        let mut h = r.clone();
-        h.seek(layout.handle_start);
-        let references = read_references(&mut h, &common, flags)?;
-        return Ok(Some(Entity {
-            common,
-            geometry: Geometry::Unread(name),
-            references,
-        }));
+        return read_unread_entity(frame.type_code, classes, &mut r, &layout, entry, version);
     }
     let (common, flags) = read_common(&mut r, version)?;
     if common.handle != entry.handle {
@@ -2247,30 +2191,161 @@ pub fn read_entity_with_classes(
             what: "entity handle",
         });
     }
-    let mut owned = 0;
-    let mut boundary_counts: Vec<usize> = Vec::new();
-    let mut registered_application = false;
-    let mut frozen_layer_count = 0usize;
-    let mut multileader_slots: Vec<Slot> = Vec::new();
     // From R2007 the text values of an entity are in its string stream.
     let mut strings = layout.strings.map(|(from, _)| {
         let mut s = r.clone();
         s.seek(from);
         s
     });
-    let mut geometry = match frame.type_code {
-        TYPE_LINE => Geometry::Line(read_line(&mut r)?),
-        TYPE_POINT => Geometry::Point(read_point(&mut r)?),
-        TYPE_CIRCLE => Geometry::Circle(read_circle(&mut r)?),
-        TYPE_LWPOLYLINE => Geometry::LwPolyline(read_lwpolyline(&mut r, version)?),
+    let (mut geometry, handles) = read_geometry(frame.type_code, &mut r, &mut strings, version)?;
+    // The fields must fill the main stream exactly: a kind that stops short or
+    // runs over was read wrongly, whatever values it produced.
+    if r.position() != layout.main_end {
+        return Err(ObjectError::Unexpected {
+            what: "entity data length",
+        });
+    }
+    // The string stream, when there is one, must be read to its end too.
+    if let (Some(s), Some((_, to))) = (&strings, layout.strings) {
+        if s.position() != to {
+            return Err(ObjectError::Unexpected {
+                what: "entity string length",
+            });
+        }
+    }
+    let mut h = r.clone();
+    h.seek(layout.handle_start);
+    let references = read_references(&mut h, &common, flags)?;
+    read_entity_handles(&mut geometry, &mut h, &common, version, handles)?;
+    // The handle stream runs to the end of the object's data, padded to a byte.
+    if layout.end.saturating_sub(h.position()) >= 8 {
+        return Err(ObjectError::Unexpected {
+            what: "handle stream length",
+        });
+    }
+    Ok(Some(Entity {
+        common,
+        geometry,
+        references,
+    }))
+}
+
+/// Names the kinds the class table gives to objects of a class: a hatch,
+/// an image, a wipeout, an arc-length dimension and a multileader each have a
+/// fixed type code only in some versions.
+fn refine_type_code(frame: &mut ObjectFrame, classes: &[ClassDef]) {
+    // A hatch has the fixed type code 78 in R2000 and is an object of a class
+    // (named by its DXF name) in later versions.
+    if frame.type_code == 78
+        || (frame.type_code >= 500
+            && classes.iter().any(|c| {
+                i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "HATCH"
+            }))
+    {
+        frame.type_code = TYPE_HATCH;
+    }
+    if frame.type_code >= 500
+        && classes
+            .iter()
+            .any(|c| i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "IMAGE")
+    {
+        frame.type_code = TYPE_IMAGE;
+    }
+    // A wipeout is a raster image with no picture: it states the same fields.
+    if frame.type_code >= 500
+        && classes
+            .iter()
+            .any(|c| i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "WIPEOUT")
+    {
+        frame.type_code = TYPE_WIPEOUT;
+    }
+    // An arc-length dimension is an object of a class.
+    if frame.type_code >= 500
+        && classes.iter().any(|c| {
+            i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "ARC_DIMENSION"
+        })
+    {
+        frame.type_code = TYPE_ARC_DIMENSION;
+    }
+    // A multileader is an object of a class too.
+    if frame.type_code >= 500
+        && classes.iter().any(|c| {
+            i32::from(c.number) == i32::from(frame.type_code) && c.dxf_name == "MULTILEADER"
+        })
+    {
+        frame.type_code = TYPE_MULTILEADER;
+    }
+}
+
+/// An entity of a kind this reader does not read is still an entity: its
+/// common data and references are read, and the kind is named. `None` when
+/// the object is not an entity at all.
+fn read_unread_entity(
+    type_code: u16,
+    classes: &[ClassDef],
+    r: &mut BitReader<'_>,
+    layout: &Layout,
+    entry: ObjectEntry,
+    version: Version,
+) -> Result<Option<Entity>, ObjectError> {
+    // An entity of a kind this reader does not read is still an entity:
+    // its common data and references are read, and the kind is named.
+    let Some(name) = unread_entity_name(type_code, classes) else {
+        return Ok(None);
+    };
+    let (common, flags) = read_common(r, version)?;
+    if common.handle != entry.handle {
+        return Err(ObjectError::Unexpected {
+            what: "entity handle",
+        });
+    }
+    let mut h = r.clone();
+    h.seek(layout.handle_start);
+    let references = read_references(&mut h, &common, flags)?;
+    Ok(Some(Entity {
+        common,
+        geometry: Geometry::Unread(name),
+        references,
+    }))
+}
+
+/// What the main stream says about the handles that follow it.
+#[derive(Default)]
+struct HandleCounts {
+    /// How many vertices or attributes the entity owns (R2004 and later).
+    owned: usize,
+    /// How many boundary objects each path of a hatch names.
+    boundary_counts: Vec<usize>,
+    /// Whether the handle stream names a registered application.
+    registered_application: bool,
+    /// How many frozen layers a viewport names.
+    frozen_layer_count: usize,
+    /// The handle slots a multileader names, in order.
+    multileader_slots: Vec<Slot>,
+}
+
+/// The fields of the entity of `type_code`, read from the main stream, and
+/// what that stream says about the handles after it.
+fn read_geometry(
+    type_code: u16,
+    r: &mut BitReader<'_>,
+    strings: &mut Option<BitReader<'_>>,
+    version: Version,
+) -> Result<(Geometry, HandleCounts), ObjectError> {
+    let mut handles = HandleCounts::default();
+    let geometry = match type_code {
+        TYPE_LINE => Geometry::Line(read_line(r)?),
+        TYPE_POINT => Geometry::Point(read_point(r)?),
+        TYPE_CIRCLE => Geometry::Circle(read_circle(r)?),
+        TYPE_LWPOLYLINE => Geometry::LwPolyline(read_lwpolyline(r, version)?),
         TYPE_INSERT => {
-            let (insert, count) = read_insert(&mut r, version)?;
-            owned = count;
+            let (insert, count) = read_insert(r, version)?;
+            handles.owned = count;
             Geometry::Insert(insert)
         }
-        TYPE_TEXT => Geometry::Text(read_text(&mut r, &mut strings)?),
+        TYPE_TEXT => Geometry::Text(read_text(r, strings)?),
         TYPE_DIMENSION_ORDINATE..=TYPE_DIMENSION_DIAMETER => {
-            let kind = match frame.type_code {
+            let kind = match type_code {
                 TYPE_DIMENSION_ORDINATE => DimensionKind::Ordinate,
                 TYPE_DIMENSION_LINEAR => DimensionKind::Linear,
                 TYPE_DIMENSION_ALIGNED => DimensionKind::Aligned,
@@ -2279,43 +2354,43 @@ pub fn read_entity_with_classes(
                 TYPE_DIMENSION_RADIUS => DimensionKind::Radius,
                 _ => DimensionKind::Diameter,
             };
-            Geometry::Dimension(read_dimension(&mut r, &mut strings, version, kind)?)
+            Geometry::Dimension(read_dimension(r, strings, version, kind)?)
         }
-        TYPE_SPLINE => Geometry::Spline(read_spline(&mut r, version)?),
+        TYPE_SPLINE => Geometry::Spline(read_spline(r, version)?),
         TYPE_HATCH => {
-            let (hatch, counts) = read_hatch(&mut r, &mut strings, version)?;
-            boundary_counts = counts;
+            let (hatch, counts) = read_hatch(r, strings, version)?;
+            handles.boundary_counts = counts;
             Geometry::Hatch(hatch)
         }
-        TYPE_TRACE => Geometry::Trace(read_solid(&mut r)?),
+        TYPE_TRACE => Geometry::Trace(read_solid(r)?),
         TYPE_RAY | TYPE_XLINE => {
             let line = InfiniteLine {
                 point: r.point_3bd()?,
                 vector: r.point_3bd()?,
             };
-            if frame.type_code == TYPE_RAY {
+            if type_code == TYPE_RAY {
                 Geometry::Ray(line)
             } else {
                 Geometry::Xline(line)
             }
         }
-        TYPE_TOLERANCE => Geometry::Tolerance(read_tolerance(&mut r, &mut strings, version)?),
+        TYPE_TOLERANCE => Geometry::Tolerance(read_tolerance(r, strings, version)?),
         TYPE_POLYLINE_2D => {
-            let (polyline, count) = read_polyline_2d(&mut r, version)?;
-            owned = count;
+            let (polyline, count) = read_polyline_2d(r, version)?;
+            handles.owned = count;
             Geometry::Polyline2d(polyline)
         }
         TYPE_POLYLINE_3D => {
-            let (polyline, count) = read_polyline_3d(&mut r, version)?;
-            owned = count;
+            let (polyline, count) = read_polyline_3d(r, version)?;
+            handles.owned = count;
             Geometry::Polyline3d(polyline)
         }
-        TYPE_VERTEX_2D => Geometry::Vertex2d(read_vertex_2d(&mut r, version)?),
+        TYPE_VERTEX_2D => Geometry::Vertex2d(read_vertex_2d(r, version)?),
         TYPE_POLYLINE_PFACE => {
             let vertex_count = r.bit_short()?;
             let face_count = r.bit_short()?;
-            owned = if version >= Version::R2004 {
-                bounded_count(&mut r, "vertex count")?
+            handles.owned = if version >= Version::R2004 {
+                bounded_count(r, "vertex count")?
             } else {
                 0
             };
@@ -2333,8 +2408,8 @@ pub fn read_entity_with_classes(
             let n_count = r.bit_short()?;
             let m_density = r.bit_short()?;
             let n_density = r.bit_short()?;
-            owned = if version >= Version::R2004 {
-                bounded_count(&mut r, "vertex count")?
+            handles.owned = if version >= Version::R2004 {
+                bounded_count(r, "vertex count")?
             } else {
                 0
             };
@@ -2362,56 +2437,58 @@ pub fn read_entity_with_classes(
             point: r.point_3bd()?,
         }),
         TYPE_MTEXT => {
-            let (mtext, application) = read_mtext(&mut r, &mut strings, version)?;
-            registered_application = application;
+            let (mtext, application) = read_mtext(r, strings, version)?;
+            handles.registered_application = application;
             Geometry::Mtext(mtext)
         }
-        TYPE_ATTRIB => Geometry::Attrib(read_attribute(&mut r, &mut strings, version, false)?),
-        TYPE_ATTDEF => Geometry::Attdef(read_attribute(&mut r, &mut strings, version, true)?),
-        TYPE_ELLIPSE => Geometry::Ellipse(read_ellipse(&mut r)?),
-        TYPE_SOLID => Geometry::Solid(read_solid(&mut r)?),
-        TYPE_3DFACE => Geometry::Face3d(read_face3d(&mut r)?),
-        TYPE_IMAGE => Geometry::Image(read_image(&mut r, version)?),
-        TYPE_WIPEOUT => Geometry::Wipeout(read_image(&mut r, version)?),
-        TYPE_LEADER => Geometry::Leader(read_leader(&mut r, version)?),
-        TYPE_MLINE => Geometry::Mline(read_mline(&mut r)?),
+        TYPE_ATTRIB => Geometry::Attrib(read_attribute(r, strings, version, false)?),
+        TYPE_ATTDEF => Geometry::Attdef(read_attribute(r, strings, version, true)?),
+        TYPE_ELLIPSE => Geometry::Ellipse(read_ellipse(r)?),
+        TYPE_SOLID => Geometry::Solid(read_solid(r)?),
+        TYPE_3DFACE => Geometry::Face3d(read_face3d(r)?),
+        TYPE_IMAGE => Geometry::Image(read_image(r, version)?),
+        TYPE_WIPEOUT => Geometry::Wipeout(read_image(r, version)?),
+        TYPE_LEADER => Geometry::Leader(read_leader(r, version)?),
+        TYPE_MLINE => Geometry::Mline(read_mline(r)?),
         TYPE_ARC_DIMENSION => Geometry::Dimension(read_dimension(
-            &mut r,
-            &mut strings,
+            r,
+            strings,
             version,
             DimensionKind::ArcLength,
         )?),
         TYPE_MULTILEADER => {
-            let (multileader, slots) = read_multileader(&mut r, &mut strings, version)?;
-            multileader_slots = slots;
+            let (multileader, slots) = read_multileader(r, strings, version)?;
+            handles.multileader_slots = slots;
             Geometry::MultiLeader(Box::new(multileader))
         }
         TYPE_VIEWPORT => {
-            let (viewport, frozen) = read_viewport(&mut r, &mut strings, version)?;
-            frozen_layer_count = frozen;
+            let (viewport, frozen) = read_viewport(r, strings, version)?;
+            handles.frozen_layer_count = frozen;
             Geometry::Viewport(viewport)
         }
-        _ => Geometry::Arc(read_arc(&mut r)?),
+        _ => Geometry::Arc(read_arc(r)?),
     };
-    // The fields must fill the main stream exactly: a kind that stops short or
-    // runs over was read wrongly, whatever values it produced.
-    if r.position() != layout.main_end {
-        return Err(ObjectError::Unexpected {
-            what: "entity data length",
-        });
-    }
-    // The string stream, when there is one, must be read to its end too.
-    if let (Some(s), Some((_, to))) = (&strings, layout.strings) {
-        if s.position() != to {
-            return Err(ObjectError::Unexpected {
-                what: "entity string length",
-            });
-        }
-    }
-    let mut h = r.clone();
-    h.seek(layout.handle_start);
-    let references = read_references(&mut h, &common, flags)?;
-    let style = match &mut geometry {
+    Ok((geometry, handles))
+}
+
+/// The handles an entity names after its fields, read into the entity: its
+/// text style, the vertices it owns, the objects its paths and parts refer
+/// to.
+fn read_entity_handles(
+    geometry: &mut Geometry,
+    h: &mut BitReader<'_>,
+    common: &CommonEntity,
+    version: Version,
+    handles: HandleCounts,
+) -> Result<(), ObjectError> {
+    let HandleCounts {
+        owned,
+        boundary_counts,
+        registered_application,
+        frozen_layer_count,
+        multileader_slots,
+    } = handles;
+    let style = match &mut *geometry {
         Geometry::Text(t) => Some(&mut t.style),
         Geometry::Mtext(m) => Some(&mut m.style),
         Geometry::Attrib(a) | Geometry::Attdef(a) => Some(&mut a.text.style),
@@ -2430,7 +2507,7 @@ pub fn read_entity_with_classes(
     }
     // A polyline names its vertices -- R2000 the first and the last, later versions all
     // of them -- and then the sequence end.
-    let (vertices, sequence_end) = match &mut geometry {
+    let (vertices, sequence_end) = match &mut *geometry {
         Geometry::Polyline2d(p) => (Some(&mut p.vertices), Some(&mut p.sequence_end)),
         Geometry::Polyline3d(p) => (Some(&mut p.vertices), Some(&mut p.sequence_end)),
         Geometry::PolylinePface(p) => (Some(&mut p.vertices), Some(&mut p.sequence_end)),
@@ -2446,7 +2523,7 @@ pub fn read_entity_with_classes(
         }
         *sequence_end = h.handle()?.resolve(common.handle).filter(|&v| v != 0);
     }
-    if let Geometry::Hatch(hatch) = &mut geometry {
+    if let Geometry::Hatch(hatch) = &mut *geometry {
         for (path, count) in hatch.paths.iter_mut().zip(&boundary_counts) {
             for _ in 0..*count {
                 if let Some(v) = h.handle()?.resolve(common.handle).filter(|&v| v != 0) {
@@ -2455,10 +2532,10 @@ pub fn read_entity_with_classes(
             }
         }
     }
-    if let Geometry::Tolerance(t) = &mut geometry {
+    if let Geometry::Tolerance(t) = &mut *geometry {
         t.style = h.handle()?.resolve(common.handle).filter(|&v| v != 0);
     }
-    if let Geometry::Viewport(v) = &mut geometry {
+    if let Geometry::Viewport(v) = &mut *geometry {
         let mut next = || -> Result<Option<u64>, ObjectError> {
             Ok(h.handle()?.resolve(common.handle).filter(|&x| x != 0))
         };
@@ -2480,24 +2557,24 @@ pub fn read_entity_with_classes(
             next()?; // the sun
         }
     }
-    if let Geometry::Mline(m) = &mut geometry {
+    if let Geometry::Mline(m) = &mut *geometry {
         m.style = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
     }
-    if let Geometry::MultiLeader(m) = &mut geometry {
+    if let Geometry::MultiLeader(m) = &mut *geometry {
         for slot in multileader_slots {
             let handle = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
             m.set_slot(slot, handle);
         }
     }
-    if let Geometry::Leader(l) = &mut geometry {
+    if let Geometry::Leader(l) = &mut *geometry {
         l.annotation = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
         l.style = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
     }
-    if let Geometry::Image(i) | Geometry::Wipeout(i) = &mut geometry {
+    if let Geometry::Image(i) | Geometry::Wipeout(i) = &mut *geometry {
         i.definition = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
         i.reactor = h.handle()?.resolve(common.handle).filter(|&x| x != 0);
     }
-    if let Geometry::Dimension(d) = &mut geometry {
+    if let Geometry::Dimension(d) = &mut *geometry {
         // A null handle (zero) names nothing.
         let mut next = || -> Result<Option<u64>, ObjectError> {
             Ok(h.handle()?.resolve(common.handle).filter(|&v| v != 0))
@@ -2505,7 +2582,7 @@ pub fn read_entity_with_classes(
         d.style = next()?;
         d.block = next()?;
     }
-    if let Geometry::Insert(insert) = &mut geometry {
+    if let Geometry::Insert(insert) = &mut *geometry {
         insert.block = h
             .handle()?
             .resolve(common.handle)
@@ -2522,17 +2599,7 @@ pub fn read_entity_with_classes(
             insert.sequence_end = h.handle()?.resolve(common.handle);
         }
     }
-    // The handle stream runs to the end of the object's data, padded to a byte.
-    if layout.end.saturating_sub(h.position()) >= 8 {
-        return Err(ObjectError::Unexpected {
-            what: "handle stream length",
-        });
-    }
-    Ok(Some(Entity {
-        common,
-        geometry,
-        references,
-    }))
+    Ok(())
 }
 
 /// A viewport: a window in a paper-space layout onto a view of model space.
