@@ -476,6 +476,7 @@ fn insert_entity(
             .filter_map(|h| attribs.get(h).cloned())
             .collect(),
         extrusion: point(i.extrusion),
+        array: None,
     })
 }
 
